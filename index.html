@@ -570,14 +570,20 @@ $('#songs').addEventListener('click', async e => {
 });
 $('#songs').addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('song')) { e.preventDefault(); e.target.click(); } });
 
-$('#file').addEventListener('change', async e => {
-  const files = [...e.target.files]; e.target.value = '';
+async function addSongFiles(files) {
   let last = null;
   for (const f of files) {
+    if (!/^audio\//.test(f.type) && !/\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|webm)$/i.test(f.name)) continue;
     const song = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), name: f.name.replace(/\.[^.]+$/, ''), blob: f };
     songs.push(song); await DB.put(song); last = song;
   }
   if (last) { selectedId = last.id; store.set('rr-sel', selectedId); prepared = null; renderSongs(); prepare(); }
+  return last;
+}
+$('#file').addEventListener('change', async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  const last = await addSongFiles(files);
+  if (window.__VRM) window.__VRM.fileAdded(last);
 });
 
 $('#diff').addEventListener('click', e => {
@@ -630,17 +636,21 @@ function ytMeta() {
   if (changed) { DB.put(song); renderSongs(); if (song.bpm && !game) prepare(); }
 }
 
-$('#ytForm').addEventListener('submit', async e => {
-  e.preventDefault();
-  const id = parseYouTube($('#ytUrl').value);
-  if (!id) { setStatus('Ese link no parece de YouTube. Copia el enlace del video (youtube.com/watch?v=… o youtu.be/…).', true); return; }
+async function addYouTube(id) {
   let song = songs.find(s => s.yt === id);
   if (!song) {
     song = { id: 'yt-' + id, name: 'Video de YouTube (' + id + ')', yt: id, bpm: null, offset: 0, dur: 0 };
     songs.push(song); await DB.put(song);
   }
-  $('#ytUrl').value = '';
   selectedId = song.id; store.set('rr-sel', selectedId); prepared = null; renderSongs(); prepare();
+  return song;
+}
+$('#ytForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const id = parseYouTube($('#ytUrl').value);
+  if (!id) { setStatus('Ese link no parece de YouTube. Copia el enlace del video (youtube.com/watch?v=… o youtu.be/…).', true); return; }
+  await addYouTube(id);
+  $('#ytUrl').value = '';
   $('#ytPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
 });
 
@@ -659,21 +669,26 @@ function solveTaps() {
   return { bpm: 60 / spb, offset: ((icpt % spb) + spb) % spb };
 }
 
-$('#tapBtn').addEventListener('pointerdown', async e => {
-  e.preventDefault();
+// devuelve { started, count, bpm } para la pantalla 2D y el menú VR
+async function ytTap() {
   const song = songs.find(s => s.id === selectedId);
-  if (!song || !song.yt || !ytReady) return;
-  if (ytPlayer.getPlayerState() !== 1) { ytPlayer.playVideo(); $('#ytHint').textContent = 'Ahora toca el botón con cada golpe del ritmo.'; return; }
+  if (!song || !song.yt || !ytReady) return null;
+  if (ytPlayer.getPlayerState() !== 1) { ytPlayer.unMute(); ytPlayer.playVideo(); $('#ytHint').textContent = 'Ahora toca el botón con cada golpe del ritmo.'; return { started: true, count: taps.length, bpm: song.bpm }; }
   const t = ytPlayer.getCurrentTime();
   if (taps.length && (t - taps[taps.length - 1] > 2 || t < taps[taps.length - 1])) taps = [];
   taps.push(t);
-  const b = e.currentTarget; b.classList.add('hit'); setTimeout(() => b.classList.remove('hit'), 90);
   const r = solveTaps();
   if (r) $('#bpmIn').value = r.bpm.toFixed(1);
-  b.textContent = taps.length < 8 ? `Toca al ritmo (${taps.length}/8)` : `¡Listo! ${r ? r.bpm.toFixed(1) : '—'} BPM · sigue para afinar`;
+  $('#tapBtn').textContent = taps.length < 8 ? `Toca al ritmo (${taps.length}/8)` : `¡Listo! ${r ? r.bpm.toFixed(1) : '—'} BPM · sigue para afinar`;
   if (r && taps.length >= 8) {
     song.bpm = r.bpm; song.offset = r.offset; ytMeta(); await DB.put(song); prepare();
   }
+  return { started: false, count: taps.length, bpm: r ? r.bpm : song.bpm };
+}
+$('#tapBtn').addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const b = e.currentTarget; b.classList.add('hit'); setTimeout(() => b.classList.remove('hit'), 90);
+  ytTap();
 });
 
 async function setBpm(v) {
@@ -688,6 +703,7 @@ $('#bpmIn').addEventListener('change', e => setBpm(parseFloat(e.target.value)));
 $('#halfBtn').addEventListener('click', () => { const s = songs.find(x => x.id === selectedId); if (s && s.bpm) setBpm(s.bpm / 2); });
 $('#dblBtn').addEventListener('click', () => { const s = songs.find(x => x.id === selectedId); if (s && s.bpm) setBpm(s.bpm * 2); });
 $('#tapReset').addEventListener('click', () => { taps = []; $('#tapBtn').textContent = 'Toca al ritmo'; });
+let KB_TEXT = '';
 
 /* ---------- Escena 3D ---------- */
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -1895,8 +1911,10 @@ const VRM = (() => {
   const panel = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
   panel.visible = false; panel.renderOrder = 20; scene.add(panel);
   const disp = "'Bungee', 'Arial Black', sans-serif", body = "'Barlow', 'Segoe UI', sans-serif";
-  let page = 0, hover = null, dirty = true, boxes = [], mode = 'menu';
-  const PER = 5;
+  let page = 0, hover = null, dirty = true, boxes = [], mode = 'menu', tick = 0;
+  const PER = 4;
+  let shift = false, kbMsg = '', tapInfo = null;
+  const KEYS = ['1234567890', 'qwertyuiop', 'asdfghjkl', 'zxcvbnm', './:?=-_&'];
 
   // láser de cada mando
   const rays = [0, 1].map(i => {
@@ -1940,6 +1958,54 @@ const VRM = (() => {
     g.clearRect(0, 0, W, H);
     rr(6, 6, W - 12, H - 12, 44); g.fillStyle = 'rgba(16,10,32,0.92)'; g.fill();
     g.lineWidth = 4; g.strokeStyle = 'rgba(180,140,255,0.6)'; g.stroke();
+    if (mode === 'file') {
+      g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.font = `56px ${disp}`; g.fillStyle = '#9fe9ff'; g.fillText('AGREGAR MÚSICA', W / 2, 140);
+      g.font = `600 30px ${body}`; g.fillStyle = '#f3ecff';
+      ['Elige tus canciones en la ventana que se abrió.', 'Sirven MP3, M4A, OGG, WAV y FLAC guardados en tus Quest.', '', 'Si no se abrió ninguna ventana, sal de VR', 'y toca «Agregar canciones» en la página.']
+        .forEach((l, i) => g.fillText(l, W / 2, 230 + i * 50));
+      button('pickAgain', 112, 520, 380, 100, 'Abrir de nuevo', { font: `600 34px ${body}` });
+      button('exitPick', 532, 520, 380, 100, 'Salir de VR', { font: `600 34px ${body}` });
+      button('back', 312, 650, 400, 90, 'Volver', { font: `600 34px ${body}` });
+      tex.needsUpdate = true; dirty = false; return;
+    }
+    if (mode === 'yt') {
+      g.textAlign = 'left'; g.textBaseline = 'alphabetic'; g.font = `46px ${disp}`; g.fillStyle = '#ff3d6e'; g.fillText('LINK DE YOUTUBE', 48, 86);
+      rr(46, 104, W - 92, 70, 14); g.fillStyle = '#0d0820'; g.fill(); g.lineWidth = 3; g.strokeStyle = '#9fe9ff'; g.stroke();
+      g.font = `600 32px ${body}`; g.fillStyle = KB_TEXT ? '#f3ecff' : '#6f6296'; g.textBaseline = 'middle';
+      let t = KB_TEXT || 'youtu.be/… o youtube.com/watch?v=…'; while (g.measureText(t).width > W - 140 && t.length > 4) t = t.slice(1);
+      g.fillText(t + (KB_TEXT ? '▏' : ''), 66, 140);
+      KEYS.forEach((row, r) => [...row].forEach((ch, i) => {
+        const k = shift ? ch.toUpperCase() : ch, x = 62 + i * 90 + (r === 2 ? 45 : r === 3 ? 90 : r === 4 ? 135 : 0);
+        button('k:' + k, x, 196 + r * 70, 82, 60, k, { font: `600 32px ${body}` });
+      }));
+      button('shift', 62, 196 + 3 * 70, 82, 60, '⇧', { sel: shift, font: `34px ${body}` });
+      button('bksp', 62 + 9 * 90 - 90, 196 + 3 * 70, 172, 60, '⌫ Borrar', { font: `600 26px ${body}` });
+      button('paste', 62, 196 + 5 * 70, 260, 62, 'Pegar', { font: `600 30px ${body}` });
+      button('clear', 334, 196 + 5 * 70, 260, 62, 'Limpiar', { font: `600 30px ${body}` });
+      if (kbMsg) { g.textAlign = 'left'; g.font = `600 24px ${body}`; g.fillStyle = '#ffc23d'; g.fillText(kbMsg, 612, 196 + 5 * 70 + 31); }
+      button('back', 46, 660, 300, 96, 'Cancelar', { font: `600 34px ${body}` });
+      button('ytOk', 370, 660, 608, 96, 'Agregar', { sel: !!parseYouTube(KB_TEXT), fill: '#ff3d6e', textCol: '#ffffff', font: `44px ${disp}` });
+      tex.needsUpdate = true; dirty = false; return;
+    }
+    if (mode === 'tap') {
+      const song = songs.find(x => x.id === selectedId) || {};
+      const playing = ytReady && ytPlayer.getPlayerState && ytPlayer.getPlayerState() === 1;
+      g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.font = `50px ${disp}`; g.fillStyle = '#ffc23d'; g.fillText('MARCA EL RITMO', W / 2, 90);
+      g.font = `600 28px ${body}`; g.fillStyle = '#a99cc7';
+      let nm = song.name || ''; while (g.measureText(nm).width > W - 120 && nm.length > 4) nm = nm.slice(0, -2);
+      g.fillText(nm, W / 2, 134);
+      g.font = `600 30px ${body}`; g.fillStyle = '#f3ecff';
+      g.fillText(playing ? 'Aprieta el gatillo con cada golpe del ritmo (8 veces seguidas)' : 'Aprieta el gatillo para que suene la canción', W / 2, 196);
+      const n = taps.length, bpm = song.bpm;
+      g.font = `120px ${disp}`; g.fillStyle = n >= 8 ? '#7fe8a0' : '#2fc6ff'; g.fillText(Math.min(n, 8) + '/8', W / 2, 345);
+      g.font = `600 40px ${body}`; g.fillStyle = '#f3ecff'; g.fillText(bpm ? bpm.toFixed(1) + ' BPM' : '— BPM', W / 2, 410);
+      button('half', 112, 450, 180, 80, '÷2', { font: `40px ${disp}` });
+      button('dbl', 312, 450, 180, 80, '×2', { font: `40px ${disp}` });
+      button('tapReset', 532, 450, 380, 80, 'Reiniciar conteo', { font: `600 30px ${body}` });
+      button('back', 46, 640, 300, 110, 'Volver', { font: `600 34px ${body}` });
+      button('tapDone', 370, 640, 608, 110, bpm ? 'Listo' : 'Marca el ritmo…', { sel: !!bpm, fill: '#2fc6ff', textCol: '#ffffff', font: `48px ${disp}` });
+      tex.needsUpdate = true; dirty = false; return;
+    }
     if (mode === 'pause') {
       g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.font = `96px ${disp}`; g.fillStyle = '#ffc23d'; g.fillText('PAUSA', W / 2, 170);
       g.font = `600 28px ${body}`; g.fillStyle = '#a99cc7'; g.fillText('Botón X/Y o A/B: pausar y continuar', W / 2, 225);
@@ -1962,10 +2028,14 @@ const VRM = (() => {
     });
     if (pages > 1) {
       button('up', 620, 206, 92, 62, '▲', { font: `34px ${disp}` });
-      button('down', 620, 206 + 4 * 74, 92, 62, '▼', { font: `34px ${disp}` });
-      g.font = `600 24px ${body}`; g.fillStyle = '#a99cc7'; g.textAlign = 'center'; g.fillText(`${page + 1} / ${pages}`, 666, 206 + 2 * 74 + 38);
+      button('down', 620, 206 + 3 * 74, 92, 62, '▼', { font: `34px ${disp}` });
+      g.font = `600 24px ${body}`; g.fillStyle = '#a99cc7'; g.textAlign = 'center'; g.fillText(`${page + 1} / ${pages}`, 666, 206 + 1.5 * 74 + 38);
     }
 
+    button('addFile', 46, 506, 272, 62, '+ Música', { font: `600 30px ${body}` });
+    button('addYt', 334, 506, 272, 62, '+ YouTube', { font: `600 30px ${body}` });
+    const cur = songs.find(x => x.id === selectedId);
+    if (cur && cur.yt) button('tapMode', 620, 506, 92, 62, 'BPM', { font: `600 24px ${body}` });
     // dificultad
     g.textAlign = 'left'; g.font = `600 24px ${body}`; g.fillStyle = '#a99cc7'; g.fillText('DIFICULTAD', 744, 190);
     [['easy', 'Fácil'], ['normal', 'Normal'], ['hard', 'Difícil']].forEach(([k, l], i) => button('diff:' + k, 740, 206 + i * 74, 246, 62, l, { sel: diff === k }));
@@ -1997,6 +2067,28 @@ const VRM = (() => {
       renderSongs(); prepare();
     } else if (id === 'up') page = Math.max(0, page - 1);
     else if (id === 'down') page++;
+    else if (id === 'addFile' || id === 'pickAgain') { mode = 'file'; try { $('#file').click(); } catch (e) {} }
+    else if (id === 'exitPick') { if (session) session.end(); setTimeout(() => { $('#file').scrollIntoView({ block: 'center' }); setStatus('Toca «Agregar canciones» para elegir tu música y luego «Entrar en VR».', true); }, 300); }
+    else if (id === 'addYt') { mode = 'yt'; kbMsg = ''; }
+    else if (id === 'back') { mode = 'menu'; try { if (ytReady && ytPlayer.getPlayerState() === 1) ytPlayer.pauseVideo(); } catch (e) {} }
+    else if (id.startsWith('k:')) { KB_TEXT += id.slice(2); kbMsg = ''; if (shift) shift = false; }
+    else if (id === 'shift') shift = !shift;
+    else if (id === 'bksp') KB_TEXT = KB_TEXT.slice(0, -1);
+    else if (id === 'clear') { KB_TEXT = ''; kbMsg = ''; }
+    else if (id === 'paste') {
+      try { navigator.clipboard.readText().then(t => { KB_TEXT = (t || '').trim(); kbMsg = KB_TEXT ? '' : 'El portapapeles está vacío'; dirty = true; }).catch(() => { kbMsg = 'No se pudo pegar: escríbelo'; dirty = true; }); }
+      catch (e) { kbMsg = 'No se pudo pegar: escríbelo'; }
+    }
+    else if (id === 'ytOk') {
+      const vid = parseYouTube(KB_TEXT);
+      if (!vid) { kbMsg = 'Ese link no es de YouTube'; }
+      else if (!ytReady) { kbMsg = 'YouTube aún no carga, espera'; }
+      else { KB_TEXT = ''; addYouTube(vid).then(() => { taps = []; mode = 'tap'; dirty = true; }); }
+    }
+    else if (id === 'tapMode') { taps = []; mode = 'tap'; }
+    else if (id === 'half' || id === 'dbl') { const so = songs.find(x => x.id === selectedId); if (so && so.bpm) setBpm(id === 'half' ? so.bpm / 2 : so.bpm * 2).then(() => { dirty = true; }); }
+    else if (id === 'tapReset') { taps = []; }
+    else if (id === 'tapDone') { const so = songs.find(x => x.id === selectedId); if (so && so.bpm) { try { ytPlayer.pauseVideo(); } catch (e) {} mode = 'menu'; } }
     else if (id === 'tilt-') setGloveTilt(GLOVE_TILT - 10);
     else if (id === 'tilt+') setGloveTilt(GLOVE_TILT + 10);
     else if (id === 'resume') resumeGame();
@@ -2025,11 +2117,14 @@ const VRM = (() => {
 
   rays.forEach(r => r.ctrl.addEventListener('selectstart', () => {
     if (!panel.visible) return;
-    const h = hitOf(r.ctrl); if (h && h.box) act(h.box.id);
+    const h = hitOf(r.ctrl);
+    if (h && h.box) act(h.box.id);
+    else if (mode === 'tap') ytTap().then(() => { dirty = true; });
   }));
 
   return {
     show, hide, dirty: () => { dirty = true; },
+    fileAdded(song) { if (!panel.visible) return; if (song) mode = 'menu'; dirty = true; },
     get open() { return panel.visible; },
     update() {
       if (!panel.visible) return;
@@ -2040,6 +2135,7 @@ const VRM = (() => {
         r.dot.visible = !!h; if (h) { r.dot.position.copy(h.point); if (h.box) hv = h.box.id; }
       }
       if (hv !== hover) { hover = hv; dirty = true; }
+      if (mode === 'tap' && (++tick % 15 === 0)) dirty = true;
       if (dirty) draw();
     }
   };
