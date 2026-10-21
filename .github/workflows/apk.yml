@@ -21,13 +21,13 @@ jobs:
       BUBBLEWRAP_KEYSTORE_PASSWORD: ringritmico-sideload
       BUBBLEWRAP_KEY_PASSWORD: ringritmico-sideload
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -60,6 +60,7 @@ jobs:
       - name: Generar proyecto Android
         working-directory: android
         run: |
+          unset ANDROID_SDK_ROOT
           jq --argjson c "$GITHUB_RUN_NUMBER" --arg v "1.0.$GITHUB_RUN_NUMBER" \
              '.appVersionCode = $c | .appVersionName = $v | .appVersion = $v' twa-manifest.json > t.json && mv t.json twa-manifest.json
           bubblewrap update --skipVersionUpgrade --manifest=./twa-manifest.json
@@ -67,6 +68,8 @@ jobs:
       - name: Compilar APK
         working-directory: android
         run: |
+          unset ANDROID_SDK_ROOT
+          export ANDROID_HOME="$HOME/android-sdk"
           bubblewrap build --manifest=./twa-manifest.json --skipPwaValidation
           cp app-release-signed.apk ../ring-ritmico.apk
 
