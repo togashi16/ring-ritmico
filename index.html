@@ -478,7 +478,7 @@ let prepared = null; // {id, diff, buf, chart}
 let prepToken = 0;
 let xrOK = false;
 
-function setStatus(t, warn) { const s = $('#status'); s.textContent = t; s.classList.toggle('warn', !!warn); }
+function setStatus(t, warn) { const s = $('#status'); s.textContent = t; s.classList.toggle('warn', !!warn); if (window.__VRM) window.__VRM.dirty(); }
 
 function renderSongs() {
   $('#songs').innerHTML = songs.map(s => {
@@ -495,7 +495,8 @@ function renderSongs() {
 function updateButtons() {
   const ready = prepared && prepared.id === selectedId && prepared.diff === diff && (!prepared.yt || ytReady);
   $('#pcBtn').disabled = !ready;
-  $('#vrBtn').disabled = !ready || !xrOK;
+  $('#vrBtn').disabled = !ready || !(xrOK || navigator.xr);
+  if (window.__VRM) window.__VRM.dirty();
 }
 
 async function getBuffer(song) {
@@ -536,8 +537,8 @@ async function prepare() {
   let msg = `Listo: ${pl(c.orbCount, 'golpe', 'golpes')}${c.wallCount ? ` y ${pl(c.wallCount, 'barra', 'barras')}` : ''}`
     + (prepared.yt && !song.dur ? '' : ` · ${m}:${String(s).padStart(2, '0')} min`)
     + ` · ${Math.round(c.bpm)} BPM` + (c.drops && c.drops.length ? ` · ${pl(c.drops.length, 'subida', 'subidas')}` : '') + '.';
-  if (!xrOK) msg += ' VR no disponible aquí: abre esta página en el navegador de tus Meta Quest (con https).';
-  setStatus(msg, !xrOK);
+  if (!xrOK && !navigator.xr) msg += ' Este dispositivo no tiene VR: abre la página en el navegador de tus Meta Quest.';
+  setStatus(msg, !xrOK && !navigator.xr);
   updateButtons();
 }
 
@@ -1360,7 +1361,7 @@ const xrHands = [0, 1].map(i => {
   const h = { grip, hs, side: -1, isHand: false, src: null };
   grip.addEventListener('connected', e => { h.src = e.data; h.side = e.data.handedness === 'left' ? 0 : 1; h.isHand = !!e.data.hand; });
   grip.addEventListener('disconnected', () => { h.side = -1; h.src = null; });
-  ctrl.addEventListener('selectstart', () => { if (game && game.state === 'results') exitGame(); });
+  ctrl.addEventListener('selectstart', () => { if (game && game.state === 'results') backToMenu(); });
   return h;
 });
 function syncXR() {
@@ -1724,6 +1725,7 @@ function frame() {
   }
   updateEnv(dt);
   updateFx(dt);
+  VRM.update(); hud.visible = !!game && !VRM.open;
   if (renderer.xr.isPresenting) renderer.render(scene, camera); else PP.render(dt);
 }
 
@@ -1749,7 +1751,7 @@ function drawHud(now) {
     g.fillText(`Aciertos ${Math.round(pct * 100)}%  ·  Perfectos ${game.perfect}`, 320, 230);
     g.fillText(`Combo máx. ${game.maxCombo}` + (game.mode === 'vr' ? `  ·  Barras ${game.dodged}/${game.dodged + game.wallHits}` : ''), 320, 280);
     g.textAlign = 'center'; g.fillStyle = '#f3ecff'; g.font = `700 38px ${body}`;
-    g.fillText(game.mode === 'vr' ? 'Aprieta el gatillo para volver al menú' : 'Pulsa Salir para volver al menú', W / 2, H - 80);
+    g.fillText(game.mode === 'vr' ? 'Aprieta el gatillo para elegir otra canción' : 'Pulsa Salir para volver al menú', W / 2, H - 80);
     hudTex.needsUpdate = true; return;
   }
   g.textAlign = 'left'; g.fillStyle = '#a99cc7'; g.font = `600 32px ${body}`; g.fillText('PUNTOS', 60, 80);
@@ -1789,15 +1791,14 @@ function backToMenu() {
   stopAudio();
   if (game && game.state !== 'results' && songTime() > 5) showResults();
   clearNotes(); game = null;
+  renderSongs();
+  if (session) { VRM.show(); return; }          // en VR: vuelve al menú flotante sin salir del visor
   renderer.setAnimationLoop(null);
   gloves.forEach(g => (g.visible = false));
   $('#stage').hidden = true; $('#quit').hidden = true;
-  renderSongs();
 }
 
-function exitGame() {
-  if (session) session.end(); else backToMenu();
-}
+function exitGame() { backToMenu(); }
 
 $('#pcBtn').addEventListener('click', () => {
   // el menú queda debajo del escenario para que el video de YouTube siga sonando
@@ -1808,19 +1809,174 @@ $('#pcBtn').addEventListener('click', () => {
 $('#quit').addEventListener('click', exitGame);
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && game && !session) exitGame(); });
 
-$('#vrBtn').addEventListener('click', async () => {
+/* ---------- Menú dentro de VR (para el APK y para elegir sin quitarse el visor) ---------- */
+const VRM = (() => {
+  const W = 1024, H = 800, PW = 1.5, PH = PW * H / W;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  const tex = new THREE.CanvasTexture(cv);
+  const panel = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+  panel.visible = false; panel.renderOrder = 20; scene.add(panel);
+  const disp = "'Bungee', 'Arial Black', sans-serif", body = "'Barlow', 'Segoe UI', sans-serif";
+  let page = 0, hover = null, dirty = true, boxes = [];
+  const PER = 5;
+
+  // láser de cada mando
+  const rays = [0, 1].map(i => {
+    const ctrl = renderer.xr.getController(i);
+    const geo = new THREE.BufferGeometry().setFromPoints([V(0, 0, 0), V(0, 0, -1)]);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x9fe9ff, transparent: true, opacity: 0.85 }));
+    line.scale.z = 3; line.visible = false; ctrl.add(line);
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.012, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    dot.visible = false; scene.add(dot);
+    return { ctrl, line, dot };
+  });
+
+  const rc = new THREE.Raycaster(), m4 = new THREE.Matrix4();
+  function hitOf(ctrl) {
+    m4.identity().extractRotation(ctrl.matrixWorld);
+    rc.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+    rc.ray.direction.set(0, 0, -1).applyMatrix4(m4);
+    const hit = rc.intersectObject(panel, false)[0];
+    if (!hit) return null;
+    const x = hit.uv.x * W, y = (1 - hit.uv.y) * H;
+    return { point: hit.point, dist: hit.distance, box: boxes.find(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) || null };
+  }
+
+  function rr(x, y, w, h, r) { g.beginPath(); g.roundRect ? g.roundRect(x, y, w, h, r) : g.rect(x, y, w, h); }
+  function button(id, x, y, w, h, label, opts = {}) {
+    const on = hover === id, sel = opts.sel;
+    rr(x, y, w, h, 18);
+    g.fillStyle = sel ? (opts.fill || '#ffc23d') : on ? '#3b2a63' : '#241944'; g.fill();
+    g.lineWidth = on ? 5 : 3; g.strokeStyle = on ? '#9fe9ff' : sel ? (opts.fill || '#ffc23d') : '#4a3878'; g.stroke();
+    g.fillStyle = sel ? (opts.textCol || '#160f24') : '#f3ecff'; g.font = opts.font || `600 34px ${body}`;
+    g.textAlign = opts.align || 'center'; g.textBaseline = 'middle';
+    const tx = opts.align === 'left' ? x + 26 : x + w / 2;
+    let t = label; while (g.measureText(t).width > w - 52 && t.length > 4) t = t.slice(0, -2);
+    if (t !== label) t = t.slice(0, -1) + '…';
+    g.fillText(t, tx, y + h / 2 + 2);
+    boxes.push({ id, x, y, w, h });
+  }
+
+  function draw() {
+    boxes = [];
+    g.clearRect(0, 0, W, H);
+    rr(6, 6, W - 12, H - 12, 44); g.fillStyle = 'rgba(16,10,32,0.92)'; g.fill();
+    g.lineWidth = 4; g.strokeStyle = 'rgba(180,140,255,0.6)'; g.stroke();
+    g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+    g.font = `66px ${disp}`; g.fillStyle = '#2fc6ff'; g.fillText('RING', 46, 100);
+    g.fillStyle = '#ff3d6e'; g.fillText('RÍTMICO', 46 + g.measureText('RING ').width, 100);
+    g.font = `600 26px ${body}`; g.fillStyle = '#a99cc7'; g.fillText('Apunta con el mando (o con la mano) y aprieta el gatillo (o junta los dedos)', 48, 142);
+
+    // canciones
+    g.font = `600 24px ${body}`; g.fillStyle = '#a99cc7'; g.fillText('CANCIÓN', 48, 190);
+    const pages = Math.max(1, Math.ceil(songs.length / PER)); page = Math.min(page, pages - 1);
+    songs.slice(page * PER, page * PER + PER).forEach((s, i) => {
+      const b = best[s.id + '|' + diff];
+      button('song:' + s.id, 46, 206 + i * 74, 560, 62, s.name + (s.yt ? '  ▶' : '') + (b ? `   ·  ${b.toLocaleString('es-PE')}` : ''), { sel: s.id === selectedId, align: 'left', fill: '#9fe9ff' });
+    });
+    if (pages > 1) {
+      button('up', 620, 206, 92, 62, '▲', { font: `34px ${disp}` });
+      button('down', 620, 206 + 4 * 74, 92, 62, '▼', { font: `34px ${disp}` });
+      g.font = `600 24px ${body}`; g.fillStyle = '#a99cc7'; g.textAlign = 'center'; g.fillText(`${page + 1} / ${pages}`, 666, 206 + 2 * 74 + 38);
+    }
+
+    // dificultad
+    g.textAlign = 'left'; g.font = `600 24px ${body}`; g.fillStyle = '#a99cc7'; g.fillText('DIFICULTAD', 744, 190);
+    [['easy', 'Fácil'], ['normal', 'Normal'], ['hard', 'Difícil']].forEach(([k, l], i) => button('diff:' + k, 740, 206 + i * 74, 246, 62, l, { sel: diff === k }));
+
+    // estado y acciones
+    const ready = prepared && prepared.id === selectedId && prepared.diff === diff && (!prepared.yt || ytReady);
+    g.textAlign = 'left'; g.font = `600 26px ${body}`; g.fillStyle = ready ? '#7fe8a0' : '#ffc23d';
+    const st = $('#status').textContent.replace(/ VR no disponible.*$/, '');
+    let t = st; while (g.measureText(t).width > W - 96 && t.length > 4) t = t.slice(0, -2);
+    g.fillText(t === st ? t : t + '…', 48, 610);
+    button('play', 46, 640, 620, 110, ready ? 'JUGAR' : 'Preparando…', { sel: ready, fill: '#ff3d6e', textCol: '#ffffff', font: `52px ${disp}` });
+    button('exit', 690, 640, 296, 110, 'Salir de VR', { font: `600 32px ${body}` });
+    tex.needsUpdate = true; dirty = false;
+  }
+
+  function act(id) {
+    if (!id) return;
+    if (id.startsWith('song:')) {
+      const sid = id.slice(5); if (sid === selectedId) return;
+      selectedId = sid; store.set('rr-sel', sid); prepared = null; renderSongs(); prepare();
+    } else if (id.startsWith('diff:')) {
+      diff = id.slice(5); store.set('rr-diff', diff);
+      $('#diff').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x.dataset.d === diff));
+      renderSongs(); prepare();
+    } else if (id === 'up') page = Math.max(0, page - 1);
+    else if (id === 'down') page++;
+    else if (id === 'play') {
+      const ready = prepared && prepared.id === selectedId && prepared.diff === diff && (!prepared.yt || ytReady);
+      if (!ready) return;
+      hide(); ac().resume(); if (prepared.yt) ytStart(); startGame('vr');
+    } else if (id === 'exit') { if (session) session.end(); }
+    dirty = true;
+  }
+
+  function show() {
+    if (!renderer.xr.isPresenting) return;
+    const cam = renderer.xr.getCamera(camera);
+    const p = V().setFromMatrixPosition(cam.matrixWorld), d = cam.getWorldDirection(V());
+    d.y = 0; if (d.lengthSq() < 1e-4) d.set(0, 0, -1); d.normalize();
+    const eye = p.y > 0.5 ? p.y : 1.5;
+    panel.position.set(p.x + d.x * 1.4, eye - 0.15, p.z + d.z * 1.4);
+    panel.lookAt(p.x, eye - 0.15, p.z);
+    panel.visible = true; hud.visible = false; dirty = true;
+  }
+  function hide() { panel.visible = false; rays.forEach(r => { r.line.visible = false; r.dot.visible = false; }); }
+
+  rays.forEach(r => r.ctrl.addEventListener('selectstart', () => {
+    if (!panel.visible) return;
+    const h = hitOf(r.ctrl); if (h && h.box) act(h.box.id);
+  }));
+
+  return {
+    show, hide, dirty: () => { dirty = true; },
+    get open() { return panel.visible; },
+    update() {
+      if (!panel.visible) return;
+      let hv = null;
+      for (const r of rays) {
+        const h = r.ctrl.visible !== false ? hitOf(r.ctrl) : null;
+        r.line.visible = true; r.line.scale.z = h ? h.dist : 3;
+        r.dot.visible = !!h; if (h) { r.dot.position.copy(h.point); if (h.box) hv = h.box.id; }
+      }
+      if (hv !== hover) { hover = hv; dirty = true; }
+      if (dirty) draw();
+    }
+  };
+})();
+
+window.__VRM = VRM;
+async function enterVR(fromLaunch) {
+  if (!navigator.xr) { setStatus('Este navegador no tiene VR. Abre la página en el navegador de tus Meta Quest.', true); return false; }
   ac().resume();
-  if (prepared.yt) ytStart();
   try {
     session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
-  } catch (e) { if (prepared.yt) try { ytPlayer.pauseVideo(); } catch (_) {} setStatus('El visor no permitió entrar en VR. Revisa que la página esté abierta con https en el navegador de Quest.', true); return; }
-  session.addEventListener('end', () => { session = null; backToMenu(); });
+  } catch (e) {
+    if (!fromLaunch) setStatus('El visor no dejó entrar en VR. Abre la página en el navegador de tus Meta Quest y toca "Entrar en VR".', true);
+    return false;
+  }
+  session.addEventListener('end', () => { session = null; VRM.hide(); hud.visible = true; backToMenu(); renderer.setAnimationLoop(null); });
   try { renderer.xr.setFoveation && renderer.xr.setFoveation(1); } catch (e) {}
   await renderer.xr.setSession(session);
-  startGame('vr');
+  renderer.setAnimationLoop(frame);
+  setTimeout(() => VRM.show(), 300);
+  return true;
+}
+
+$('#vrBtn').addEventListener('click', async () => {
+  if (prepared && prepared.yt) ytStart();
+  if (await enterVR(false)) { VRM.hide(); startGame('vr'); }
+  else if (prepared && prepared.yt) try { ytPlayer.pauseVideo(); } catch (_) {}
 });
 /* ---------- Inicio ---------- */
+const IS_APP = new URLSearchParams(location.search).has('app') || typeof window.getDigitalGoodsService === 'function';
 (async () => {
+  // en el APK, tocar el icono cuenta como gesto: se entra a VR apenas carga la página
+  if (IS_APP) enterVR(true).then(ok => { if (!ok) setStatus('Toca "Entrar en VR" para empezar.', false); });
   await DB.open();
   const saved = await DB.all();
   songs = songs.concat(saved);

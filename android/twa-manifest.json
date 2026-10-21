@@ -18,7 +18,10 @@
   "iconUrl": "https://togashi16.github.io/ring-ritmico/icon-512.png",
   "maskableIconUrl": "https://togashi16.github.io/ring-ritmico/icon-maskable-512.png",
   "splashScreenFadeOutDuration": 300,
-  "signingKey": { "path": "./android.keystore", "alias": "android" },
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "android"
+  },
   "appVersionName": "1.0.0",
   "appVersionCode": 1,
   "shortcuts": [],
@@ -26,15 +29,22 @@
   "webManifestUrl": "https://togashi16.github.io/ring-ritmico/manifest.webmanifest",
   "fallbackType": "customtabs",
   "features": {},
-  "alphaDependencies": { "enabled": false },
+  "alphaDependencies": {
+    "enabled": false
+  },
   "enableSiteSettingsShortcut": false,
   "isChromeOSOnly": false,
   "isMetaQuest": true,
-  "horizonOSAppMode": "2D",
+  "horizonOSAppMode": "immersive",
   "fullScopeUrl": "https://togashi16.github.io/ring-ritmico/",
   "minSdkVersion": 23,
   "orientation": "landscape",
-  "fingerprints": [{ "name": "sideload", "value": "A7:37:59:0D:FB:47:1C:98:ED:DF:EE:EA:E8:C6:2F:0D:6C:20:6B:22:A9:17:33:69:2C:3A:6F:D3:81:65:B3:4A" }],
+  "fingerprints": [
+    {
+      "name": "sideload",
+      "value": "A7:37:59:0D:FB:47:1C:98:ED:DF:EE:EA:E8:C6:2F:0D:6C:20:6B:22:A9:17:33:69:2C:3A:6F:D3:81:65:B3:4A"
+    }
+  ],
   "additionalTrustedOrigins": [],
   "retainedBundles": [],
   "appVersion": "1.0.0"
