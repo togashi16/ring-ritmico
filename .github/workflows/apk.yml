@@ -1,0 +1,87 @@
+name: Construir APK para Meta Quest
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # Clave solo para instalar el APK por tu cuenta (sideload). No es una clave de tienda.
+      BUBBLEWRAP_KEYSTORE_PASSWORD: ringritmico-sideload
+      BUBBLEWRAP_KEY_PASSWORD: ringritmico-sideload
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Esperar a que la página esté publicada
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS https://togashi16.github.io/ring-ritmico/icon-512.png -o /dev/null && \
+               curl -fsS https://togashi16.github.io/ring-ritmico/manifest.webmanifest -o /dev/null; then
+              echo "Página lista"; exit 0; fi
+            echo "Esperando a GitHub Pages ($i)…"; sleep 15
+          done
+          echo "GitHub Pages no respondió a tiempo"; exit 1
+
+      - name: Instalar Bubblewrap de Meta
+        run: npm install --global @meta-quest/bubblewrap-cli@1.24.1
+
+      - name: Configurar JDK y Android SDK
+        run: |
+          SDK="$HOME/android-sdk"
+          mkdir -p "$SDK"
+          for f in "$ANDROID_HOME"/*; do ln -s "$f" "$SDK/$(basename "$f")"; done
+          ln -sfn "$ANDROID_HOME/cmdline-tools/latest/bin" "$SDK/bin"
+          ln -sfn "$ANDROID_HOME/cmdline-tools/latest/lib" "$SDK/lib"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "build-tools;34.0.0" > /dev/null
+          mkdir -p "$HOME/.bubblewrap"
+          printf '{"jdkPath":"%s","androidSdkPath":"%s"}' "$JAVA_HOME" "$SDK" > "$HOME/.bubblewrap/config.json"
+          cat "$HOME/.bubblewrap/config.json"
+
+      - name: Generar proyecto Android
+        working-directory: android
+        run: |
+          jq --argjson c "$GITHUB_RUN_NUMBER" --arg v "1.0.$GITHUB_RUN_NUMBER" \
+             '.appVersionCode = $c | .appVersionName = $v | .appVersion = $v' twa-manifest.json > t.json && mv t.json twa-manifest.json
+          bubblewrap update --skipVersionUpgrade --manifest=./twa-manifest.json
+
+      - name: Compilar APK
+        working-directory: android
+        run: |
+          bubblewrap build --manifest=./twa-manifest.json --skipPwaValidation
+          cp app-release-signed.apk ../ring-ritmico.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ring-ritmico-apk
+          path: ring-ritmico.apk
+
+      - name: Publicar en Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Ring Rítmico APK
+          body: |
+            APK para Meta Quest (versión 1.0.${{ github.run_number }}).
+            Instálalo con SideQuest o Meta Quest Developer Hub y ábrelo desde "Orígenes desconocidos".
+          files: ring-ritmico.apk
+          make_latest: true
