@@ -1006,28 +1006,64 @@ const searchlights = roofs.filter((r, i) => i % 9 === 4).slice(0, 7).map(([x, y,
 
 // Portal de energía eléctrica
 const portal = new THREE.Mesh(new THREE.RingGeometry(2.3, 3.7, 160, 6), new THREE.ShaderMaterial({
-  ...addBlend, side: THREE.DoubleSide, fog: false, uniforms: { uTime: U_TIME, uBeat: U_BEAT },
+  ...addBlend, side: THREE.DoubleSide, fog: false, uniforms: { uTime: U_TIME, uBeat: U_BEAT, uClimax: { value: 0 }, uGain: { value: 1 } },
   vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-  fragmentShader: NOISE + `varying vec3 vP; uniform float uTime; uniform float uBeat;
+  fragmentShader: NOISE + `varying vec3 vP; uniform float uTime; uniform float uBeat; uniform float uClimax; uniform float uGain;
     void main(){
       float r = length(vP.xy), a = atan(vP.y, vP.x), band = (r - 2.3) / 1.4;
       float n = fbm3(vec3(cos(a) * 4.0, sin(a) * 4.0, band * 4.0 - uTime * 1.3) + vec3(0.0, 0.0, uTime * 0.5));
       float bq = (band - 0.5) * 9.0; float core = exp(-bq * bq);
-      float bolt = smoothstep(0.58, 0.62, n) - smoothstep(0.62, 0.7, n);
+      float th = 0.58 - uClimax * 0.08;                       // más rayos en el clímax
+      float bolt = smoothstep(th, th + 0.04, n) - smoothstep(th + 0.04, th + 0.12, n);
       float tend = (bolt * 1.6 + smoothstep(0.5, 0.85, n) * 0.5) * (1.0 - abs(band - 0.5) * 2.0);
       vec3 c = mix(vec3(1.0, 0.25, 0.75), vec3(0.2, 0.85, 1.0), 0.5 + 0.5 * sin(a * 2.0 + uTime * 1.5));
-      float e = core * (0.8 + uBeat * 0.9) + tend;
-      gl_FragColor = vec4(c * e + vec3(e * e * 0.35), clamp(e, 0.0, 1.0)); }`
+      float e = core * (0.7 + uBeat * (0.6 + uClimax * 0.7) + uClimax * 0.45) + tend * (1.0 + uClimax * 1.2);
+      e = e / (1.0 + e * 0.45);                                  // compresión suave: brilla más sin quemarse a blanco
+      e *= uGain;
+      gl_FragColor = vec4(c * e * 1.25 + vec3(e * e * 0.12), clamp(e, 0.0, 1.0)); }`
 }));
 portal.position.set(0, 1.6, -7); scene.add(portal);
 
-// Anillos del túnel
-const ringMats = [new THREE.MeshBasicMaterial({ color: COL.left, ...addBlend }), new THREE.MeshBasicMaterial({ color: COL.right, ...addBlend })];
-const ringDim = [new THREE.Color(COL.left).multiplyScalar(0.25), new THREE.Color(COL.right).multiplyScalar(0.25)];
+// Anillos del túnel: núcleo + dos capas de resplandor que crecen en el clímax de la canción
+const U_CLIMAX = { value: 0 };
+const ringMats = [], ringGlows = [], ringHalos = [], rings = [];
 const ringBright = [new THREE.Color(COL.left), new THREE.Color(COL.right)];
+const ringWhite = new THREE.Color(0xffffff), tmpC = new THREE.Color();
+const ringCore = new THREE.TorusGeometry(2.2, 0.025, 8, 96), ringGlowGeo = new THREE.TorusGeometry(2.2, 0.09, 10, 96), ringHaloGeo = new THREE.TorusGeometry(2.2, 0.26, 10, 96);
 for (let i = 0; i < 12; i++) {
-  const r = new THREE.Mesh(new THREE.TorusGeometry(2.2, 0.025, 8, 80), ringMats[i % 2]);
+  const side = i % 2;
+  const core = new THREE.MeshBasicMaterial({ color: ringBright[side].clone().multiplyScalar(0.25), ...addBlend });
+  const glow = new THREE.MeshBasicMaterial({ color: ringBright[side], ...addBlend, opacity: 0 });
+  const halo = new THREE.MeshBasicMaterial({ color: ringBright[side], ...addBlend, opacity: 0 });
+  const r = new THREE.Group();
+  r.add(new THREE.Mesh(ringCore, core), new THREE.Mesh(ringGlowGeo, glow), new THREE.Mesh(ringHaloGeo, halo));
   r.position.set(0, 1.6, -9 - i * 2.2); scene.add(r);
+  ringMats.push(core); ringGlows.push(glow); ringHalos.push(halo); rings.push(r);
+}
+let climax = 0;
+function updateRings(dt, pulse, beatPhase, beatHand, level, boost) {
+  // nivel de clímax: sube rápido cuando la canción explota y baja despacio
+  const target = Math.max(THREE.MathUtils.smoothstep(level, 0.6, 0.92), Math.min(1, boost));
+  climax += (target - climax) * (1 - Math.exp(-dt * (target > climax ? 5 : 0.7)));
+  U_CLIMAX.value = climax;
+  const t = U_TIME.value;
+  const vr = renderer.xr.isPresenting, gGlow = vr ? 1 : 0.45, gHalo = vr ? 1 : 0.2, cap = vr ? 1.8 : 1.15;  // en pantalla el bloom ya suma brillo
+  for (let i = 0; i < rings.length; i++) {
+    const side = i % 2;
+    // en el clímax, una ola de luz recorre el túnel hacia ti en cada beat
+    const wavePos = (1 - beatPhase) * (rings.length + 2) - 1, d = i - wavePos;
+    const wave = Math.exp(-d * d * 0.35) * climax;
+    const beat = side === beatHand ? pulse : pulse * 0.35;
+    const k = 0.22 + beat * (0.8 + climax * 1.4) + wave * 1.6 + climax * 0.35;
+    tmpC.copy(ringBright[side]).lerp(ringWhite, Math.min(0.6, (beat + wave) * climax * 0.5));
+    ringMats[i].color.copy(tmpC).multiplyScalar(Math.min(k, cap * (0.75 + 0.25 * (1 - i / rings.length))));        // >1 alimenta el bloom en pantalla
+    const far = 1 - i / rings.length;                                      // los lejanos se apilan en el centro: menos halo
+    ringGlows[i].opacity = gGlow * Math.min(0.65, ((beat * 0.5 + wave) * (0.25 + climax) + climax * 0.12) * (0.35 + 0.65 * far));
+    ringHalos[i].opacity = gHalo * Math.min(0.28, ((beat * 0.3 + wave * 0.5) * climax + climax * 0.04) * far * far);
+    const sc = 1 + (beat * 0.03 + wave * 0.05) * (0.3 + climax);
+    rings[i].scale.set(sc, sc, 1);
+    rings[i].rotation.z = Math.sin(t * 0.4 + i * 0.5) * 0.08 * climax;
+  }
 }
 
 // Rayos de velocidad
@@ -1770,7 +1806,11 @@ function frame() {
     pulse = Math.min(1.6, pulse + game.boost * 0.4);
     game.boost = Math.max(0, game.boost - dt * 0.8);
     ENV_SPEED = 0.55 + (game.level == null ? 0.5 : game.level) * 0.9 + game.boost;
-    ringMats.forEach((m, i) => m.color.copy(ringDim[i]).lerp(ringBright[i], i === game.beatHand ? pulse : pulse * 0.3));
+    const beatPhase = Math.min(1, Math.max(0, (now - game.lastBeat) / (game.spb || 0.5)));
+    updateRings(dt, Math.min(1, pulse), beatPhase, game.beatHand, game.level == null ? 0.4 : game.level, game.boost);
+    portal.material.uniforms.uClimax.value = climax;
+    portal.material.uniforms.uGain.value = renderer.xr.isPresenting ? 1 : 0.42;   // en pantalla el bloom ya lo amplifica
+    portal.scale.setScalar(1 + climax * 0.06 + pulse * 0.03 * climax);
     sky.material.uniforms.uFlash.value = game.flash * 0.8; U_BEAT.value = pulse;
     game.flash = Math.max(0, game.flash - dt);
 
@@ -1779,6 +1819,7 @@ function frame() {
     if (game.hudDirty && game.hudT <= 0) { drawHud(now); game.hudDirty = false; game.hudT = 0.08; }
   }
 
+  if (!game) { updateRings(dt, 0, 0, 0, 0.3, 0); portal.material.uniforms.uClimax.value = climax; portal.scale.setScalar(1); }
   // brasas de los guantes
   for (const f of fists) {
     if (!f.live) continue;
