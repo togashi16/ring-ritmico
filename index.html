@@ -837,25 +837,34 @@ floorMesh.rotation.x = -Math.PI / 2; scene.add(floorMesh);
 const pad = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints([V(-1.6, 0.01, 1.6), V(1.6, 0.01, 1.6), V(1.6, 0.01, -1.6), V(-1.6, 0.01, -1.6)]), new THREE.LineBasicMaterial({ color: 0x9fe9ff }));
 scene.add(pad);
 
-// Ciudad: torres instanciadas con fachadas procedurales realistas (3 estilos), reflejo en el piso mojado
+// Ciudad futurista: torres de varias formas (prismas, octágonos retorcidos, torres que se afinan, cilindros)
+// con fachadas procedurales; reflejo en el piso mojado. En el clímax todo se enciende de neón.
 const CITY_V = `
-  uniform float uMirror;
+  uniform float uMirror; uniform float uTwist;
   varying vec3 vL; varying vec3 vN; varying vec3 vS; varying vec3 vW; varying float vSeed; varying float vDepth;
   void main(){
     mat4 im = instanceMatrix;
     vec3 s = vec3(length(im[0].xyz), length(im[1].xyz), length(im[2].xyz));
-    vS = s; vL = position * s; vN = normalize(mat3(modelMatrix) * normal);
+    vS = s; vL = position * s;
     vSeed = fract(sin(dot(floor(im[3].xz * 0.5), vec2(12.9898, 78.233))) * 43758.5453);
-    vec4 w = modelMatrix * im * vec4(position, 1.0); vW = w.xyz;
+    vec3 p = position, nn = normal;
+    if (uTwist > 0.0) {                                   // torre retorcida: gira con la altura
+      float tw = (fract(vSeed * 9.13) > 0.5 ? 1.0 : -1.0) * uTwist * (p.y + 0.5);
+      float cs = cos(tw), sn = sin(tw);
+      p.xz = mat2(cs, -sn, sn, cs) * p.xz; nn.xz = mat2(cs, -sn, sn, cs) * nn.xz;
+    }
+    vN = normalize(mat3(modelMatrix) * nn);
+    vec4 w = modelMatrix * im * vec4(p, 1.0); vW = w.xyz;
     vec4 mv = viewMatrix * w; vDepth = -mv.z;
     gl_Position = projectionMatrix * mv;
   }`;
 const CITY_F = `
   uniform float uTime; uniform float uBeat; uniform float uMirror; uniform float uCyl; uniform float uClimax; uniform float uHoloGain;
+  uniform float uSeg; uniform float uSegOff;
   uniform vec3 uFog; uniform vec3 uA; uniform vec3 uB;
   varying vec3 vL; varying vec3 vN; varying vec3 vS; varying vec3 vW; varying float vSeed; varying float vDepth;
   float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-  vec3 skyAt(float ry){                       // el mismo degradado del cielo, para los reflejos
+  vec3 skyAt(float ry){
     vec3 hor = vec3(0.50, 0.12, 0.58), mid = vec3(0.10, 0.06, 0.32), top = vec3(0.012, 0.012, 0.06);
     vec3 c = mix(hor, mid, smoothstep(-0.02, 0.2, ry)); return mix(c, top, smoothstep(0.2, 0.75, ry));
   }
@@ -864,54 +873,63 @@ const CITY_F = `
     if (uMirror > 0.5) n.y = -n.y;
     float seed = floor(vSeed * 997.0 + 0.5) / 997.0;
     float style = floor(fract(seed * 7.13) * 3.0);          // 0 cristal · 1 oficinas · 2 viviendas
-    float wy = uMirror > 0.5 ? -vW.y : vW.y;                // altura real sobre la calle
+    if (uSeg > 0.0) style = 0.0;                            // las torres especiales siempre de cristal
+    float wy = uMirror > 0.5 ? -vW.y : vW.y;
     vec3 P = vec3(vW.x, wy, vW.z);
     vec3 V = normalize(cameraPosition - vW); if (uMirror > 0.5) V.y = -V.y;
     vec3 neonC = seed > 0.5 ? uA : uB;
+    neonC = mix(neonC, vec3(0.72, 0.42, 1.0), step(0.78, fract(seed * 5.3)));   // algunos en morado
     float H = vS.y, top = vL.y + H * 0.5;
+    float cl = uClimax;
     vec3 c;
+    float edgeLine = 0.0;                                   // contornos que se encienden en el clímax
     if (abs(n.y) > 0.5) {
-      // azotea: grava oscura, pretil algo más claro y, en algunos edificios, borde de neón
-      float e = min(vS.x * 0.5 - abs(vL.x), vS.z * 0.5 - abs(vL.z));
+      float e = uCyl > 0.5 ? (vS.x * 0.5 - length(vL.xz)) : min(vS.x * 0.5 - abs(vL.x), vS.z * 0.5 - abs(vL.z));
       c = vec3(0.022, 0.02, 0.03) + vec3(0.03, 0.028, 0.04) * (1.0 - smoothstep(0.0, 0.25, e));
-      c += neonC * exp(-e * e * 220.0) * step(0.62, seed) * 0.9;
+      float rim = exp(-e * e * 160.0);
+      c += neonC * rim * (step(0.62, seed) * 0.9 + cl * 1.6);
     } else {
-      float faceW; float u;
-      if (uCyl > 0.5) { float a = atan(vL.z, vL.x); u = a * vS.x * 0.5; faceW = 3.14159 * vS.x; }
+      float faceW; float u; float corner = 1e3;
+      if (uCyl > 0.5) {
+        float a = atan(vL.z, vL.x);
+        float rad = length(vL.xz);
+        u = a * rad; faceW = 6.2832 * rad;
+        if (uSeg > 0.0) {                                    // aristas de las torres facetadas
+          float k = fract((a + uSegOff) / (6.2832 / uSeg));
+          corner = min(k, 1.0 - k) * (6.2832 / uSeg) * rad;
+        }
+      }
       else if (abs(n.x) > 0.5) { u = vL.z; faceW = vS.z; }
       else { u = vL.x; faceW = vS.x; }
       u += faceW * 0.5;
-      float FH = style == 0.0 ? 3.4 : style == 1.0 ? 3.2 : 2.9;           // altura de piso
-      float BW = style == 0.0 ? 1.5 : style == 1.0 ? 2.1 : 2.8;           // ancho de cada vano
+      float edge = uCyl > 0.5 ? corner : min(u, faceW - u);
+      float FH = style == 0.0 ? 3.4 : style == 1.0 ? 3.2 : 2.9;
+      float BW = style == 0.0 ? 1.5 : style == 1.0 ? 2.1 : 2.8;
       vec2 g = vec2(u / BW, P.y / FH);
       vec2 id = floor(g), f = fract(g);
       vec2 fw = fwidth(g); float far = smoothstep(0.18, 0.55, max(fw.x, fw.y));
       vec2 fid = id + floor(n.xz * 1.5 + 0.5) * 31.0 + seed * 113.0;
 
-      // marco: losas y columnas (mullions), según el estilo
       float slab = style == 0.0 ? 0.07 : style == 1.0 ? 0.30 : 0.26;
       float mull = style == 0.0 ? 0.035 : style == 1.0 ? 0.09 : 0.16;
       float wx = smoothstep(mull, mull + 0.02, f.x) * smoothstep(1.0 - mull, 1.0 - mull - 0.02, f.x);
       float wyy = smoothstep(slab, slab + 0.02, f.y) * smoothstep(0.97, 0.95, f.y);
       float win = wx * wyy;
 
-      // material del marco + luz de la calle desde abajo + oclusión en la base
       vec3 frameC = style == 0.0 ? vec3(0.028, 0.03, 0.045) : style == 1.0 ? vec3(0.07, 0.066, 0.08) : vec3(0.085, 0.068, 0.064);
-      frameC += vec3(0.42, 0.24, 0.10) * exp(-P.y * 0.28) * 0.35;           // farolas cálidas
-      frameC += neonC * exp(-P.y * 0.18) * 0.12;                             // neón de la calle
-      frameC += vec3(0.05, 0.025, 0.09) * smoothstep(10.0, 80.0, P.y);        // cielo en lo alto
+      frameC += vec3(0.42, 0.24, 0.10) * exp(-P.y * 0.28) * 0.35;
+      frameC += neonC * exp(-P.y * 0.18) * 0.12;
+      frameC += vec3(0.05, 0.025, 0.09) * smoothstep(10.0, 80.0, P.y);
       float ao = 0.55 + 0.45 * smoothstep(0.0, 9.0, P.y);
-      float edge = min(u, faceW - u); ao *= 0.7 + 0.3 * smoothstep(0.0, 0.6, edge);
+      ao *= 0.7 + 0.3 * smoothstep(0.0, 0.6, edge);
       frameC *= ao;
-      if (style == 2.0) frameC += vec3(0.05, 0.045, 0.05) * (1.0 - smoothstep(0.0, 0.025, abs(f.y - 0.36))) * wx; // barandas de balcón
+      if (style == 2.0) frameC += vec3(0.05, 0.045, 0.05) * (1.0 - smoothstep(0.0, 0.025, abs(f.y - 0.36))) * wx;
 
-      // cristal apagado: refleja el cielo con efecto Fresnel
       vec3 R = reflect(-V, n);
       float F = 0.04 + 0.96 * pow(clamp(1.0 - abs(dot(n, V)), 0.0, 1.0), 5.0);
       vec3 tint = style == 0.0 ? vec3(0.01, 0.025, 0.04) : vec3(0.012, 0.012, 0.02);
       vec3 glass = tint + skyAt(R.y) * (0.18 + 0.75 * F) * (style == 0.0 ? 1.0 : 0.7);
 
-      // interiores encendidos: oficinas agrupadas por piso, viviendas sueltas
       float roomW = style == 1.0 ? 4.0 : style == 0.0 ? 3.0 : 1.0;
       float room = h21(vec2(floor(id.x / roomW), id.y) + fid.yx * 0.01 + seed * 7.0);
       float density = style == 2.0 ? 0.42 : 0.35 + seed * 0.2;
@@ -921,143 +939,196 @@ const CITY_F = `
       float r2 = h21(fid * 1.3);
       vec3 warm = vec3(1.0, 0.72, 0.42), cool = vec3(0.72, 0.84, 1.0), tv = vec3(0.35, 0.45, 1.0);
       vec3 lc = style == 2.0 ? (r2 > 0.85 ? tv * (0.7 + 0.3 * sin(uTime * 7.0 + r2 * 40.0)) : warm) : (r2 > 0.8 ? warm : cool);
-      float ceiling = mix(0.55, 1.0, smoothstep(slab, 0.97, f.y));          // más luz cerca del techo
+      lc = mix(lc, neonC * 1.2 + 0.15, cl * 0.55);                          // en el clímax las ventanas toman color neón
+      float ceiling = mix(0.55, 1.0, smoothstep(slab, 0.97, f.y));
       float blinds = h21(fid * 2.1) > 0.6 ? 0.82 + 0.18 * step(0.5, fract(f.y * 14.0)) : 1.0;
-      vec3 interior = lc * (0.38 + 0.4 * r2) * ceiling * blinds * (style == 2.0 ? 0.85 : 1.0);
+      vec3 interior = lc * (0.38 + 0.4 * r2) * ceiling * blinds * (style == 2.0 ? 0.85 : 1.0) * (1.0 + cl * 0.5);
       vec3 winC = mix(glass, interior + glass * 0.25, lit);
-
-      // a lo lejos se promedia para que no haya ruido
       vec3 avgWin = mix(glass, (style == 2.0 ? warm : cool) * 0.36 + glass * 0.25, density * 0.9);
       winC = mix(winC, avgWin, far);
       float winF = mix(win, (1.0 - 2.0 * mull) * (0.97 - slab), far);
       c = mix(frameC, winC, winF);
 
-      // planta baja: tiendas iluminadas con letrero
       if (P.y < 4.6) {
         float sh = h21(vec2(floor(u / 4.0), seed * 50.0));
         float pillar = smoothstep(0.0, 0.08, fract(u / 4.0)) * smoothstep(1.0, 0.92, fract(u / 4.0));
-        float pane = smoothstep(0.0, 0.03, fract(u / 1.33)) * smoothstep(1.0, 0.97, fract(u / 1.33));   // marcos de la vitrina
+        float pane = smoothstep(0.0, 0.03, fract(u / 1.33)) * smoothstep(1.0, 0.97, fract(u / 1.33));
         float shopWin = pillar * pane * smoothstep(0.35, 0.45, P.y) * smoothstep(3.5, 3.4, P.y);
         vec3 shopL = sh > 0.7 ? vec3(1.0, 0.8, 0.55) : sh > 0.35 ? vec3(0.75, 0.88, 1.0) : vec3(0.0);
-        float grad = 0.35 + 0.65 * smoothstep(0.4, 3.4, P.y);                 // luz del techo de la tienda
+        float grad = 0.35 + 0.65 * smoothstep(0.4, 3.4, P.y);
         float shelves = 0.75 + 0.25 * step(0.5, fract(P.y * 2.2 + sh)) * step(0.25, fract(u * 0.9 + sh * 3.0));
         vec3 shopC = shopL * (0.16 + 0.14 * sh) * grad * shelves + vec3(0.02, 0.018, 0.035);
-        shopC += skyAt(reflect(-V, n).y) * 0.08;                              // reflejo en la vitrina
+        shopC += skyAt(reflect(-V, n).y) * 0.08;
         float sign = smoothstep(3.65, 3.7, P.y) * smoothstep(4.35, 4.3, P.y) * pillar * step(0.3, sh);
-        vec3 signC = mix(uA, uB, step(0.65, sh)) * (0.8 + 0.2 * sin(uTime * 3.0 + sh * 20.0));
+        vec3 signC = mix(uA, uB, step(0.65, sh)) * (0.8 + 0.2 * sin(uTime * 3.0 + sh * 20.0)) * (1.0 + cl);
         c = mix(vec3(0.03, 0.028, 0.04), shopC, shopWin);
         c = mix(c, signC, sign);
         c *= 0.6 + 0.4 * smoothstep(0.0, 0.5, P.y);
       }
 
-      // algunos edificios conservan franjas y esquinas de neón
-      if (seed > 0.55) {
-        float every = (6.0 + floor(seed * 4.0) * 2.0) * FH;
-        float d = abs(P.y - every * floor(P.y / every + 0.5));
-        float pulse = 0.55 + 0.45 * sin(uTime * 2.2 - P.y * 0.25 + seed * 6.0);
-        c += neonC * exp(-d * d * 90.0) * (0.55 * pulse + uBeat * 0.45) * step(6.0, P.y);
-      }
-      if (style == 0.0 && uCyl < 0.5) c += neonC * exp(-edge * edge * 900.0) * 0.6;
-      c += neonC * smoothstep(H - 0.45, H - 0.08, top) * 0.5 * step(0.4, seed);   // corona
+      // franjas de neón por pisos: algunas siempre, en el clímax todos los edificios
+      float every = (uSeg > 0.0 ? 4.0 : 6.0 + floor(seed * 4.0) * 2.0) * FH;
+      float d = abs(P.y - every * floor(P.y / every + 0.5));
+      float pulse = 0.55 + 0.45 * sin(uTime * 2.2 - P.y * 0.25 + seed * 6.0);
+      float stripeOn = mix(step(0.55, seed) + (uSeg > 0.0 ? 1.0 : 0.0), 1.0, cl);
+      c += neonC * exp(-d * d * 90.0) * (0.55 * pulse + uBeat * 0.45) * min(stripeOn, 1.0) * (1.0 + cl * 2.2) * step(6.0, P.y);
+      // aristas luminosas: torres de cristal y facetadas siempre; todas en el clímax
+      float edgeOn = (style == 0.0 || uSeg > 0.0) ? 1.0 : cl;
+      c += neonC * exp(-edge * edge * 600.0) * (0.6 + cl * 1.8 + uBeat * cl) * edgeOn;
+      edgeLine = exp(-edge * edge * 600.0);
+      c += neonC * smoothstep(H - 0.45, H - 0.08, top) * (0.5 * step(0.4, seed) + cl * 1.4);
+      // en el clímax un barrido de luz sube por las fachadas al ritmo
+      float scanY = mod(uTime * 22.0 + seed * 40.0, 150.0);
+      float scan = exp(-pow((P.y - scanY) * 0.3, 2.0));
+      c += neonC * scan * cl * 0.9;
     }
-    // atmósfera: neblina más densa abajo y a lo lejos
     float fogF = clamp((vDepth - 20.0) / 140.0, 0.0, 0.9);
     float haze = exp(-max(P.y, 0.0) * 0.1) * 0.3 * smoothstep(10.0, 55.0, vDepth);
-    c = mix(c, uFog, clamp(fogF + haze, 0.0, 0.93));
-    // CLÍMAX: el edificio se vuelve invisible y queda solo su estructura de neón
-    float alpha = 1.0;
-    if (uClimax > 0.01) {
-      float FHc = 3.2;
-      float uu, fwU;
-      if (uCyl > 0.5) { uu = atan(vL.z, vL.x) * vS.x * 0.5; }
-      else uu = abs(n.x) > 0.5 ? vL.z : vL.x;
-      float faceWc = uCyl > 0.5 ? 3.14159 * vS.x : (abs(n.x) > 0.5 ? vS.z : vS.x);
-      uu += faceWc * 0.5;
-      float topc = vL.y + vS.y * 0.5;
-      // distancias a las líneas: esquinas, techo, pisos y columnas
-      float dEdge = uCyl > 0.5 ? 1e3 : min(uu, faceWc - uu);
-      float dTop = vS.y - topc;
-      float dFloor = abs(fract(P.y / FHc + 0.5) - 0.5) * FHc;
-      float dCol = abs(fract(uu / 3.0 + 0.5) - 0.5) * 3.0;
-      if (abs(n.y) > 0.5) { dEdge = min(vS.x * 0.5 - abs(vL.x), vS.z * 0.5 - abs(vL.z)); dTop = 1e3; dFloor = 1e3; dCol = 1e3; }
-      float px = max(fwidth(P.y), 0.004);
-      float edgeL = 1.0 - smoothstep(px * 1.2, px * 3.0, min(dEdge, dTop));      // contorno grueso
-      float gridL = (1.0 - smoothstep(px * 0.5, px * 1.6, min(dFloor, dCol))) * 0.55;  // retícula fina
-      // barrido de luz que sube por los edificios con el ritmo
-      float scanY = mod(uTime * 22.0 + seed * 40.0, 140.0);
-      float scan = exp(-pow((P.y - scanY) * 0.25, 2.0));
-      vec3 holoC = mix(uA, uB, step(0.5, fract(seed * 3.7)));
-      holoC = mix(holoC, vec3(0.75, 0.45, 1.0), step(0.75, fract(seed * 5.3)));
-      float lines = clamp(edgeL + gridL * (0.6 + scan * 1.5) + scan * 0.12, 0.0, 1.0);
-      vec3 holo = holoC * lines * (1.0 + uBeat * 0.8) + holoC * 0.05 + vec3(0.9) * edgeL * uBeat * 0.25;
-      holo *= (1.0 - fogF * 0.6) * uHoloGain;
-      c = mix(c, holo, uClimax);
-      alpha = mix(1.0, max(lines, 0.04), uClimax);
-    }
+    vec3 fogC = mix(uFog, uFog + neonC * 0.15, cl);                      // la neblina se tiñe de neón en el clímax
+    c = mix(c, fogC, clamp(fogF + haze, 0.0, 0.93) * (1.0 - cl * 0.35));
+    c = mix(c, min(c, vec3(1.6)), 1.0 - uHoloGain);                       // en pantalla se limita (el bloom ya suma)
     if (uMirror > 0.5) c *= 0.24 * smoothstep(-35.0, 0.0, vW.y);
-    gl_FragColor = vec4(c, alpha);
+    gl_FragColor = vec4(c, 1.0);
   }`;
 const cityMats = [];
-function cityMat(cyl, mirror) {
-  const m = cityMat0(cyl, mirror); cityMats.push(m); return m;
-}
-function cityMat0(cyl, mirror) {
-  return new THREE.ShaderMaterial({
-    transparent: true,
-    uniforms: { uTime: U_TIME, uBeat: U_BEAT, uClimax: U_CLIMAX, uHoloGain: U_HOLOGAIN, uMirror: { value: mirror ? 1 : 0 }, uCyl: { value: cyl ? 1 : 0 },
+function cityMat(o, mirror) {
+  const m = new THREE.ShaderMaterial({
+    uniforms: { uTime: U_TIME, uBeat: U_BEAT, uClimax: U_CLIMAX, uHoloGain: U_HOLOGAIN, uMirror: { value: mirror ? 1 : 0 },
+      uCyl: { value: o.cyl ? 1 : 0 }, uSeg: { value: o.seg || 0 }, uSegOff: { value: o.segOff || 0 }, uTwist: { value: o.twist || 0 },
       uFog: { value: new THREE.Color(0x1d0b45) }, uA: { value: new THREE.Color(COL.left) }, uB: { value: new THREE.Color(COL.right) } },
     vertexShader: CITY_V, fragmentShader: CITY_F, extensions: { derivatives: true }
   });
+  cityMats.push(m); return m;
 }
 
-const boxSpecs = [], cylSpecs = [], roofs = [], frontFaces = [];
+const SPEC = { box: [], oct: [], twist: [], taper: [], cyl: [] };
+const roofs = [], frontFaces = [], spires = [], haloRings = [], bridges = [];
 const rand = (a, b) => a + Math.random() * (b - a);
-function tower(x, z, w, d, h, cyl, near) {
-  if (cyl) { cylSpecs.push([x, h / 2, z, w, h, w]); roofs.push([x, h, z, w * 0.7, w * 0.7, near]); return; }
-  const h1 = h * rand(0.55, 0.75); boxSpecs.push([x, h1 / 2, z, w, h1, d]);
-  let top = h1, tw = w, td = d;
-  if (h > 22) { const h2 = h * rand(0.18, 0.3); tw = w * rand(0.7, 0.85); td = d * rand(0.7, 0.85); boxSpecs.push([x, top + h2 / 2, z, tw, h2, td]); top += h2; }
-  if (h > 45) { const h3 = h * 0.1; tw *= 0.6; td *= 0.6; boxSpecs.push([x, top + h3 / 2, z, tw, h3, td]); top += h3; }
-  roofs.push([x, top, z, tw, td, near]);
+function tower(x, z, w, d, h, kind, near) {
+  if (kind === 'box') {
+    // podio + cuerpo + remates escalonados
+    const h1 = h * rand(0.55, 0.75); SPEC.box.push([x, h1 / 2, z, w, h1, d]);
+    let top = h1, tw = w, td = d;
+    if (h > 22) { const h2 = h * rand(0.18, 0.3); tw = w * rand(0.7, 0.85); td = d * rand(0.7, 0.85); SPEC.box.push([x, top + h2 / 2, z, tw, h2, td]); top += h2; }
+    if (h > 45) { const h3 = h * 0.1; tw *= 0.6; td *= 0.6; SPEC.box.push([x, top + h3 / 2, z, tw, h3, td]); top += h3; }
+    roofs.push([x, top, z, tw, td, near, 'box']);
+    if (h > 50 && Math.random() < 0.6) spires.push([x, top, z, tw * 0.35, h * 0.18]);
+    return;
+  }
+  // torres especiales sobre un podio bajo
+  const pod = rand(5, 9);
+  SPEC.box.push([x, pod / 2, z, w * 1.25, pod, d * 1.25]);
+  const body = h - pod, r = Math.min(w, d);
+  if (kind === 'cyl') SPEC.cyl.push([x, pod + body / 2, z, r, body, r]);
+  else if (kind === 'oct') SPEC.oct.push([x, pod + body / 2, z, r, body, r]);
+  else if (kind === 'twist') SPEC.twist.push([x, pod + body / 2, z, r, body, r]);
+  else SPEC.taper.push([x, pod + body / 2, z, r * 1.414, body, r * 1.414]);
+  const topR = kind === 'taper' ? r * 0.72 : r;
+  roofs.push([x, h, z, topR * 0.7, topR * 0.7, near, 'spire']);
+  spires.push([x, h, z, topR * 0.45, Math.max(4, h * rand(0.12, 0.25))]);
+  // anillos de neón flotando alrededor de las torres altas
+  if (h > 35) for (let k = 0; k < 1 + Math.floor(Math.random() * 3); k++) haloRings.push([x, pod + body * rand(0.35, 0.92), z, topR * (kind === 'taper' ? 0.8 : 0.62) + 0.5]);
 }
-// calle principal: tres filas por lado, más altas hacia afuera (pisos de ~3 m)
+const pickKind = (near) => {
+  const r = Math.random();
+  if (near) return r < 0.6 ? 'box' : 'oct';
+  return r < 0.3 ? 'box' : r < 0.52 ? 'twist' : r < 0.72 ? 'taper' : r < 0.88 ? 'oct' : 'cyl';
+};
+// calle principal: tres filas por lado
+const row1 = { '-1': [], '1': [] };
+const decor = { canopies: [], fins: [] };
 for (const side of [-1, 1]) {
   for (let i = 0; i < 17; i++) {
     for (let j = 0; j < 3; j++) {
       if (j > 0 && Math.random() < 0.18) continue;
       const w = rand(3.2, 5.2), d = rand(3.6, 4.6), x = side * (7.4 + j * 7 + rand(0, 1.0)), z = -3 - i * 4.6 + rand(-0.3, 0.3);
-      const h = rand(13, 26) + j * rand(10, 24) + (Math.random() < 0.12 ? 35 : 0);
-      const cyl = j > 0 && Math.random() < 0.18;
-      tower(x, z, cyl ? w * 0.9 : w, d, h, cyl, j === 0);
+      // la primera fila es baja (tiendas y podios) para que se vean las torres futuristas de atrás
+      const h = j === 0 ? rand(9, 17) + (Math.random() < 0.15 ? 10 : 0) : j === 1 ? rand(30, 62) : rand(45, 95);
+      const kind = pickKind(j === 0);
+      tower(x, z, w, d, h, kind, j === 0);
+      if (j === 0 && kind === 'box') {
+        const fx = x - side * (w / 2);                               // fachada que mira a la calle
+        decor.canopies.push([fx - side * 0.45, 4.55, z, 0.9, 0.12, d * 0.86, side]);
+        const nf = 2 + Math.floor(Math.random() * 2);
+        for (let k = 0; k < nf; k++) decor.fins.push([fx - side * 0.12, 5.2 + (h - 5.2) / 2, z + (k - (nf - 1) / 2) * (d / nf), 0.24, h - 5.4, 0.1]);
+      }
       if (j === 0 && i % 2 === 0 && i < 14) frontFaces.push([x - side * (w / 2 + 0.06), z, side, Math.min(d - 0.6, 3.0), h]);
+      if (j === 1) row1[side].push([x, z, h, w]);
     }
+  }
+}
+// puentes aéreos entre torres vecinas de la segunda fila
+for (const side of ['-1', '1']) {
+  const r = row1[side];
+  for (let k = 0; k + 1 < r.length; k++) {
+    const [x1, z1, h1] = r[k], [x2, z2, h2] = r[k + 1];
+    if (Math.random() < 0.55 || Math.abs(z1 - z2) > 6) continue;
+    bridges.push([(x1 + x2) / 2, Math.min(h1, h2) * rand(0.45, 0.8), (z1 + z2) / 2, Math.abs(z1 - z2)]);
   }
 }
 // horizonte lejano
 for (let i = 0; i < 120; i++) {
   const x = (Math.random() < 0.5 ? -1 : 1) * rand(12, 80), z = rand(-85, -170);
-  tower(x, z, rand(5, 11), rand(5, 11), rand(25, 95), Math.random() < 0.15, false);
+  tower(x, z, rand(5, 11), rand(5, 11), rand(25, 95), pickKind(false), false);
 }
-// megarrascacielos al fondo del túnel
-cylSpecs.push([0, 75, -180, 16, 150, 16]); cylSpecs.push([0, 165, -180, 7, 30, 7]); roofs.push([0, 180, -180, 3, 3, false]);
+// megarrascacielos al fondo del túnel: torre retorcida gigante
+SPEC.twist.push([0, 80, -180, 18, 160, 18]); roofs.push([0, 160, -180, 4, 4, false, 'spire']); spires.push([0, 160, -180, 4, 40]);
+haloRings.push([0, 70, -180, 13], [0, 105, -180, 12.5], [0, 140, -180, 12]);
 
-function instanced(geo, specs, cyl) {
-  const m = new THREE.InstancedMesh(geo, cityMat(cyl, false), specs.length);
-  const o = new THREE.Object3D();
-  specs.forEach(([x, y, z, sx, sy, sz], i) => { o.position.set(x, y, z); o.scale.set(sx, sy, sz); o.updateMatrix(); m.setMatrixAt(i, o.matrix); });
-  m.frustumCulled = false; m.renderOrder = -2; scene.add(m);
-  const refl = new THREE.InstancedMesh(geo, cityMat(cyl, true), specs.length);   // reflejo en el asfalto mojado
-  refl.instanceMatrix = m.instanceMatrix; refl.scale.y = -1; refl.frustumCulled = false; refl.renderOrder = -3; scene.add(refl);
-  return m;
+function instanced(geo, specs, o) {
+  if (!specs.length) return;
+  const m = new THREE.InstancedMesh(geo, cityMat(o, false), specs.length);
+  const ob = new THREE.Object3D();
+  specs.forEach(([x, y, z, sx, sy, sz], i) => { ob.position.set(x, y, z); ob.scale.set(sx, sy, sz); ob.updateMatrix(); m.setMatrixAt(i, ob.matrix); });
+  m.frustumCulled = false; scene.add(m);
+  const refl = new THREE.InstancedMesh(geo, cityMat(o, true), specs.length);   // reflejo en el asfalto mojado
+  refl.instanceMatrix = m.instanceMatrix; refl.scale.y = -1; refl.frustumCulled = false; scene.add(refl);
 }
-instanced(new THREE.BoxGeometry(1, 1, 1), boxSpecs, false);
-instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 32, 1, false), cylSpecs, true);
+instanced(new THREE.BoxGeometry(1, 1, 1), SPEC.box, {});
+instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 8, 1), SPEC.oct, { cyl: true, seg: 8, segOff: 0 });
+instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 8, 24), SPEC.twist, { cyl: true, seg: 8, segOff: 0, twist: 1.3 });
+const taperGeo = new THREE.CylinderGeometry(0.36, 0.5, 1, 4, 1); taperGeo.rotateY(Math.PI / 4);
+instanced(taperGeo, SPEC.taper, { cyl: true, seg: 4, segOff: Math.PI / 4 });
+instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 36, 1), SPEC.cyl, { cyl: true });
+
+// agujas de luz en la cima, anillos flotantes y puentes aéreos (se encienden con el beat y el clímax)
+const neonPal = [COL.left, COL.right, 0xb36bff];
+const CITY_NEON = neonPal.map(c => new THREE.MeshBasicMaterial({ color: c, ...addBlend, opacity: 0.9 }));
+const cityNeonBase = neonPal.map(c => new THREE.Color(c));
+(() => {
+  const dark = new THREE.MeshBasicMaterial({ color: 0x120d1f });
+  const spireGeo = new THREE.ConeGeometry(1, 1, 8, 1), needleGeo = new THREE.CylinderGeometry(0.04, 0.04, 1, 6);
+  spires.forEach(([x, y, z, r, h], i) => {
+    const cone = new THREE.Mesh(spireGeo, dark); cone.scale.set(r, h * 0.45, r); cone.position.set(x, y + h * 0.225, z); scene.add(cone);
+    const needle = new THREE.Mesh(needleGeo, CITY_NEON[i % 3]); needle.scale.set(1, h, 1); needle.position.set(x, y + h / 2, z); scene.add(needle);
+    const tip = new THREE.Sprite(haloMat(neonPal[i % 3], 0.85)); tip.scale.setScalar(Math.max(1.2, h * 0.12)); tip.position.set(x, y + h, z); scene.add(tip);
+  });
+  const ringGeo = new THREE.TorusGeometry(1, 0.035, 6, 64);
+  haloRings.forEach(([x, y, z, r], i) => {
+    const t = new THREE.Mesh(ringGeo, CITY_NEON[(i + 1) % 3]); t.scale.set(r, r, 1); t.rotation.x = Math.PI / 2; t.position.set(x, y, z); scene.add(t);
+  });
+  const bGeo = new THREE.BoxGeometry(1, 1, 1);
+  // marquesinas sobre las tiendas, con borde de neón
+  decor.canopies.forEach(([x, y, z, w, h, d, side], i) => {
+    const cpy = new THREE.Mesh(bGeo, dark); cpy.scale.set(w, h, d); cpy.position.set(x, y, z); scene.add(cpy);
+    const lip = new THREE.Mesh(bGeo, CITY_NEON[i % 3]); lip.scale.set(0.05, 0.05, d); lip.position.set(x - side * w / 2, y - h / 2, z); scene.add(lip);
+  });
+  // aletas verticales de luz en las fachadas de la calle
+  decor.fins.forEach(([x, y, z, w, h, d], i) => {
+    const fin = new THREE.Mesh(bGeo, CITY_NEON[(i >> 1) % 3]); fin.scale.set(w * 0.35, h, d * 0.6); fin.position.set(x, y, z); scene.add(fin);
+  });
+  bridges.forEach(([x, y, z, len], i) => {
+    const b = new THREE.Mesh(bGeo, dark); b.scale.set(1.6, 1.1, len); b.position.set(x, y, z); scene.add(b);
+    const strip = new THREE.Mesh(bGeo, CITY_NEON[i % 3]); strip.scale.set(1.62, 0.08, len); strip.position.set(x, y - 0.5, z); scene.add(strip);
+    const strip2 = new THREE.Mesh(bGeo, CITY_NEON[(i + 1) % 3]); strip2.scale.set(1.62, 0.05, len); strip2.position.set(x, y + 0.55, z); scene.add(strip2);
+  });
+})();
 
 // equipos en las azoteas: aire acondicionado, tanques de agua y casetas
 (() => {
   const props = [], tanks = [];
-  roofs.forEach(([x, y, z, w, d]) => {
-    if (w < 1.5) return;
+  roofs.forEach(([x, y, z, w, d, near, kind]) => {
+    if (kind === 'spire' || w < 1.5) return;
     const n = 2 + Math.floor(Math.random() * 3);
     for (let k = 0; k < n; k++) {
       const px = x + (Math.random() - 0.5) * w * 0.6, pz = z + (Math.random() - 0.5) * d * 0.6;
@@ -1065,8 +1136,7 @@ instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 32, 1, false), cylSpecs, true)
       else { const s = 0.5 + Math.random() * 1.1; props.push([px, y + s * 0.35, pz, s, s * 0.7, s * (0.6 + Math.random() * 0.6)]); }
     }
   });
-  const mat = new THREE.MeshBasicMaterial({ color: 0x15111f, transparent: true });
-  window.__roofMat = mat;
+  const mat = new THREE.MeshBasicMaterial({ color: 0x15111f });
   const put = (geo, list) => {
     const m = new THREE.InstancedMesh(geo, mat, list.length), o = new THREE.Object3D();
     list.forEach(([x, y, z, sx, sy, sz], i) => { o.position.set(x, y, z); o.scale.set(sx, sy, sz); o.updateMatrix(); m.setMatrixAt(i, o.matrix); });
@@ -1107,8 +1177,8 @@ instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 32, 1, false), cylSpecs, true)
 
 // antenas con luz que parpadea
 const beacons = [];
-roofs.forEach(([x, y, z], i) => {
-  if (i % 3 !== 0 && i !== roofs.length - 1) return;
+roofs.forEach(([x, y, z, w, d, near, kind], i) => {
+  if (kind === 'spire' || i % 3 !== 0) return;
   const big = i === roofs.length - 1, hh = big ? 18 : rand(1.5, 4);
   const ant = new THREE.Mesh(new THREE.CylinderGeometry(big ? 0.25 : 0.03, big ? 0.5 : 0.05, hh, 6), new THREE.MeshBasicMaterial({ color: 0x1a1030 }));
   ant.position.set(x, y + hh / 2, z); scene.add(ant);
@@ -1212,9 +1282,8 @@ function updateRings(dt, pulse, beatPhase, beatHand, level, boost) {
   const target = Math.max(THREE.MathUtils.smoothstep(level, 0.6, 0.92), Math.min(1, boost));
   climax += (target - climax) * (1 - Math.exp(-dt * (target > climax ? 5 : 0.7)));
   U_CLIMAX.value = climax;
-  const holo = climax > 0.06;                       // con el edificio transparente no debe tapar lo de atrás
-  for (const m of cityMats) if (m.depthWrite === holo) { m.depthWrite = !holo; m.needsUpdate = true; }
-  if (window.__roofMat) window.__roofMat.opacity = 1 - climax;
+  // agujas, anillos flotantes y puentes de la ciudad: laten con el beat y arden en el clímax
+  CITY_NEON.forEach((m, i) => m.color.copy(cityNeonBase[i]).multiplyScalar(Math.min(1.9, 0.55 + pulse * (0.35 + climax * 0.6) + climax * 1.1)));
   const t = U_TIME.value;
   const vr = renderer.xr.isPresenting || window.__simVR;
   U_HOLOGAIN.value = vr ? 1 : 0.42;                                      // en pantalla el bloom ya multiplica las líneas
