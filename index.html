@@ -1927,7 +1927,7 @@ const PP = (() => {
       c += (rnd(vUv * uRes + fract(uTime)) - 0.5) * 0.04 * (1.0 - uVR);  // grano (no en VR)
       gl_FragColor = vec4(c, 1.0); }`,
     { tBase: { value: main.texture }, tB0: { value: A[0].texture }, tB1: { value: A[1].texture }, tB2: { value: A[2].texture }, tB3: { value: A[3].texture }, tB4: { value: A[4].texture },
-      uStr: { value: 0.7 }, uAb: { value: 0 }, uBeat: U_BEAT, uTime: U_TIME, uRes: { value: new THREE.Vector2(1, 1) }, uVR: { value: 0 } });
+      uStr: { value: 0.35 }, uAb: { value: 0 }, uBeat: U_BEAT, uTime: U_TIME, uRes: { value: new THREE.Vector2(1, 1) }, uVR: { value: 0 } });
   // objetivos propios del visor: imagen completa (dos ojos) y bloom desde 1/4 de resolución
   const xmain = mk(true), XL = 4, XA = [], XB = [];
   for (let i = 0; i < XL; i++) { XA.push(mk(false)); XB.push(mk(false)); }
