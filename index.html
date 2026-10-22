@@ -1390,7 +1390,7 @@ function updateRings(dt, pulse, beatPhase, beatHand, level, boost) {
   // agujas, anillos flotantes y puentes de la ciudad: laten con el beat y arden en el clímax
   CITY_NEON.forEach((m, i) => m.color.copy(cityNeonBase[i]).multiplyScalar(Math.min(1.9, 0.55 + pulse * (0.35 + climax * 0.6) + climax * 1.1)));
   const t = U_TIME.value;
-  const vr = renderer.xr.isPresenting || window.__simVR;
+  const vr = (renderer.xr.isPresenting && !PP.vrOn) || window.__simVR;  // sin bloom hay que dar el brillo en los materiales
   U_HOLOGAIN.value = vr ? 1 : 0.42;                                      // en pantalla el bloom ya multiplica las líneas
   const gGlow = vr ? 1 : 0.45, gHalo = vr ? 1 : 0.2, cap = vr ? 1.8 : 1.15;  // en pantalla el bloom ya suma brillo
   for (let i = 0; i < rings.length; i++) {
@@ -1897,18 +1897,21 @@ const PP = (() => {
       c = min(max(c, 0.0), vec3(3.0));
       gl_FragColor = vec4(c * smoothstep(uTh, uTh + 0.4, l), 1.0); }`,
     { tDiffuse: { value: null }, uTh: { value: 0.62 } });
-  const blur = pass(`uniform sampler2D tDiffuse; uniform vec2 uDir; varying vec2 vUv;
+  const blur = pass(`uniform sampler2D tDiffuse; uniform vec2 uDir; uniform float uSplit; varying vec2 vUv;
+    vec2 eyeClamp(vec2 uv){                       // en VR el brillo de un ojo no debe pasar al otro
+      if (uSplit < 0.5) return uv;
+      float e = step(0.5, vUv.x); uv.x = clamp(uv.x, e * 0.5 + 0.002, e * 0.5 + 0.498); return uv; }
     void main(){ vec3 c = texture2D(tDiffuse, vUv).rgb * 0.227027;
-      c += (texture2D(tDiffuse, vUv + uDir * 1.3846).rgb + texture2D(tDiffuse, vUv - uDir * 1.3846).rgb) * 0.3162162;
-      c += (texture2D(tDiffuse, vUv + uDir * 3.2308).rgb + texture2D(tDiffuse, vUv - uDir * 3.2308).rgb) * 0.0702703;
+      c += (texture2D(tDiffuse, eyeClamp(vUv + uDir * 1.3846)).rgb + texture2D(tDiffuse, eyeClamp(vUv - uDir * 1.3846)).rgb) * 0.3162162;
+      c += (texture2D(tDiffuse, eyeClamp(vUv + uDir * 3.2308)).rgb + texture2D(tDiffuse, eyeClamp(vUv - uDir * 3.2308)).rgb) * 0.0702703;
       gl_FragColor = vec4(c, 1.0); }`,
-    { tDiffuse: { value: null }, uDir: { value: new THREE.Vector2() } });
+    { tDiffuse: { value: null }, uDir: { value: new THREE.Vector2() }, uSplit: { value: 0 } });
   const comp = pass(`uniform sampler2D tBase; uniform sampler2D tB0; uniform sampler2D tB1; uniform sampler2D tB2; uniform sampler2D tB3; uniform sampler2D tB4;
-    uniform float uStr; uniform float uAb; uniform float uBeat; uniform float uTime; uniform vec2 uRes; varying vec2 vUv;
+    uniform float uStr; uniform float uAb; uniform float uBeat; uniform float uTime; uniform vec2 uRes; uniform float uVR; varying vec2 vUv;
     float rnd(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
     void main(){
       vec2 d = vUv - 0.5; float r2 = dot(d, d);
-      vec2 off = d * (0.006 + uAb * 0.03) * (0.4 + r2 * 3.0);
+      vec2 off = d * (0.006 + uAb * 0.03) * (0.4 + r2 * 3.0) * (1.0 - uVR);   // en VR sin aberración (marea)
       vec3 base = vec3(texture2D(tBase, vUv + off).r, texture2D(tBase, vUv).g, texture2D(tBase, vUv - off).b);
       float bl0 = base.r + base.g + base.b; if (!(bl0 >= 0.0 && bl0 < 1000.0)) base = vec3(0.0);
       base = min(max(base, 0.0), vec3(3.0));
@@ -1920,11 +1923,18 @@ const PP = (() => {
       c = mix(vec3(l), c, 1.18);                                         // más saturación
       c += vec3(0.035, 0.0, 0.07) * (1.0 - smoothstep(0.0, 0.35, l));    // sombras moradas
       c = c / (1.0 + c * 0.38) * 1.25;                                    // compresión suave de altas luces
-      c *= 1.0 - smoothstep(0.12, 0.5, r2) * 0.6;                        // viñeta
-      c += (rnd(vUv * uRes + fract(uTime)) - 0.5) * 0.04;                // grano
+      c *= 1.0 - smoothstep(0.12, 0.5, r2) * 0.6 * (1.0 - uVR);         // viñeta (no en VR)
+      c += (rnd(vUv * uRes + fract(uTime)) - 0.5) * 0.04 * (1.0 - uVR);  // grano (no en VR)
       gl_FragColor = vec4(c, 1.0); }`,
     { tBase: { value: main.texture }, tB0: { value: A[0].texture }, tB1: { value: A[1].texture }, tB2: { value: A[2].texture }, tB3: { value: A[3].texture }, tB4: { value: A[4].texture },
-      uStr: { value: 0.7 }, uAb: { value: 0 }, uBeat: U_BEAT, uTime: U_TIME, uRes: { value: new THREE.Vector2(1, 1) } });
+      uStr: { value: 0.7 }, uAb: { value: 0 }, uBeat: U_BEAT, uTime: U_TIME, uRes: { value: new THREE.Vector2(1, 1) }, uVR: { value: 0 } });
+  // objetivos propios del visor: imagen completa (dos ojos) y bloom desde 1/4 de resolución
+  const xmain = mk(true), XL = 4, XA = [], XB = [];
+  for (let i = 0; i < XL; i++) { XA.push(mk(false)); XB.push(mk(false)); }
+  const xcomp = comp.clone();
+  xcomp.uniforms = THREE.UniformsUtils.clone(comp.uniforms); xcomp.uniforms.uBeat = U_BEAT; xcomp.uniforms.uTime = U_TIME;
+  xcomp.uniforms.tBase.value = xmain.texture; xcomp.uniforms.uVR.value = 1;
+  for (let i = 0; i < 5; i++) xcomp.uniforms['tB' + i].value = XA[Math.min(i, XL - 1)].texture;
 
   const size = new THREE.Vector2();
   let kick = 0;
@@ -1939,6 +1949,27 @@ const PP = (() => {
       }
     },
     kick(v) { kick = Math.max(kick, v); },
+    vrOn: true,
+    renderXR(dt, xrTarget) {
+      const W = xrTarget.width, H = xrTarget.height;              // los dos ojos lado a lado
+      if (xmain.width !== W || xmain.height !== H) {
+        xmain.setSize(W, H); xcomp.uniforms.uRes.value.set(W, H);
+        for (let i = 0; i < XL; i++) { const s = Math.pow(2, i + 2); XA[i].setSize(Math.max(1, Math.round(W / s)), Math.max(1, Math.round(H / s))); XB[i].setSize(XA[i].width, XA[i].height); }
+      }
+      renderer.setRenderTarget(xmain); renderer.render(scene, camera);   // la escena con las dos cámaras del visor
+      renderer.xr.enabled = false;                                       // los pasos de imagen no usan las cámaras del visor
+      try {
+        blur.uniforms.uSplit.value = 1;
+        bright.uniforms.tDiffuse.value = xmain.texture; draw(bright, XA[0]);
+        for (let i = 0; i < XL; i++) {
+          const src = i === 0 ? XA[0] : XA[i - 1];
+          blur.uniforms.tDiffuse.value = src.texture; blur.uniforms.uDir.value.set(1 / src.width, 0); draw(blur, XB[i]);
+          blur.uniforms.tDiffuse.value = XB[i].texture; blur.uniforms.uDir.value.set(0, 1 / XB[i].height); draw(blur, XA[i]);
+        }
+        blur.uniforms.uSplit.value = 0;
+        draw(xcomp, xrTarget);
+      } finally { renderer.xr.enabled = true; }
+    },
     render(dt) {
       renderer.setRenderTarget(main); renderer.render(scene, camera);
       bright.uniforms.tDiffuse.value = main.texture; draw(bright, A[0]);
@@ -1965,9 +1996,10 @@ window.addEventListener('resize', resize); resize();
 const QUALITY = { level: 0, acc: 0, n: 0, cool: 0 };
 function applyQuality(vr) {
   const L = vr ? QUALITY.level : 0;
-  CITY_MESHES.forEach(c => { c.refl.visible = !vr; c.m.count = L >= 2 ? c.street : c.full; c.refl.count = c.m.count; });
-  dust.visible = L < 1; beams.forEach(b => (b.visible = L < 1)); searchlights.forEach(b => (b.visible = L < 1));
-  streakMeshes.forEach(m => (m.visible = L < 2)); ringHalos.forEach(m => (m.visible = L < 2));
+  PP.vrOn = L < 1;                        // nivel 1: sin post-procesado en el visor
+  CITY_MESHES.forEach(c => { c.refl.visible = !vr; c.m.count = L >= 3 ? c.street : c.full; c.refl.count = c.m.count; });
+  dust.visible = L < 2; beams.forEach(b => (b.visible = L < 2)); searchlights.forEach(b => (b.visible = L < 2));
+  streakMeshes.forEach(m => (m.visible = L < 3)); ringHalos.forEach(m => (m.visible = L < 3));
   sky.visible = true;
 }
 function trackQuality(dt, vr) {
@@ -1977,7 +2009,7 @@ function trackQuality(dt, vr) {
   QUALITY.acc += dt; QUALITY.n++;
   if (QUALITY.n >= 90) {
     const avg = QUALITY.acc / QUALITY.n;
-    if (avg > 1 / 62 && QUALITY.level < 3 && QUALITY.cool <= 0) { QUALITY.level++; QUALITY.cool = 3; }
+    if (avg > 1 / 62 && QUALITY.level < 4 && QUALITY.cool <= 0) { QUALITY.level++; QUALITY.cool = 3; }
     QUALITY.acc = 0; QUALITY.n = 0;
   }
 }
@@ -2091,6 +2123,7 @@ function hitNote(n, f, z, speed) {
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.05);
   const inVR = renderer.xr.isPresenting;
+  const xrTarget = inVR ? renderer.getRenderTarget() : null;   // imagen del visor (vale para capa clásica o de proyección)
 
   // Guantes y velocidad de cada puño
   if (inVR) syncXR(); else if (game && game.mode === 'pc') syncScreen(dt);
@@ -2197,7 +2230,7 @@ function frame() {
     const beatPhase = Math.min(1, Math.max(0, (now - game.lastBeat) / (game.spb || 0.5)));
     updateRings(dt, Math.min(1, pulse), beatPhase, game.beatHand, game.level == null ? 0.4 : game.level, game.boost);
     portal.material.uniforms.uClimax.value = climax;
-    portal.material.uniforms.uGain.value = renderer.xr.isPresenting ? 1 : 0.42;   // en pantalla el bloom ya lo amplifica
+    portal.material.uniforms.uGain.value = (renderer.xr.isPresenting && !PP.vrOn) ? 1 : 0.42;   // en pantalla el bloom ya lo amplifica
     portal.scale.setScalar(1 + climax * 0.06 + pulse * 0.03 * climax);
     sky.material.uniforms.uFlash.value = game.flash * 0.8; U_BEAT.value = pulse;
     game.flash = Math.max(0, game.flash - dt);
@@ -2211,16 +2244,18 @@ function frame() {
   // brasas de los guantes
   for (const f of fists) {
     if (!f.live) continue;
-    const n = QUALITY.level >= 3 && inVR ? (f.vel > 2 ? 1 : 0) : (f.vel > 2 ? 4 : 2), g = gloves[f.side];
+    const n = QUALITY.level >= 4 && inVR ? (f.vel > 2 ? 1 : 0) : (f.vel > 2 ? 4 : 2), g = gloves[f.side];
     for (let i = 0; i < n; i++) spawnEmber(g.localToWorld(V((Math.random() - 0.5) * 0.12, (Math.random() - 0.3) * 0.1, -0.13 + Math.random() * 0.15)), NEON[f.side]);
   }
-  { const lay = inVR && renderer.xr.getSession() && renderer.xr.getSession().renderState.baseLayer;
-    U_HALFH.value = lay ? lay.framebufferHeight / 2 : renderer.domElement.height / 2; }
+  U_HALFH.value = xrTarget ? xrTarget.height / 2 : renderer.domElement.height / 2;
   trackQuality(dt, inVR);
   updateEnv(dt);
   updateFx(dt);
   VRM.update(); hud.visible = !!game && !VRM.open;
-  if (renderer.xr.isPresenting) renderer.render(scene, camera); else PP.render(dt);
+  if (renderer.xr.isPresenting) {
+    if (PP.vrOn && xrTarget) { try { PP.renderXR(dt, xrTarget); } catch (e) { console.warn('Post-procesado VR desactivado:', e); PP.vrOn = false; QUALITY.level = Math.max(QUALITY.level, 1); renderer.xr.enabled = true; renderer.setRenderTarget(xrTarget); renderer.render(scene, camera); } }
+    else renderer.render(scene, camera);
+  } else PP.render(dt);
 }
 
 function rr(x, y, w, h, r) { hctx.beginPath(); hctx.roundRect ? hctx.roundRect(x, y, w, h, r) : hctx.rect(x, y, w, h); }
@@ -2592,7 +2627,7 @@ async function enterVR(fromLaunch) {
   await renderer.xr.setSession(session);
   // 72 Hz estables dan más margen a la GPU que 90 Hz con caídas (las caídas son lo que marea)
   try { if (session.updateTargetFrameRate && session.supportedFrameRates && [...session.supportedFrameRates].includes(72)) await session.updateTargetFrameRate(72); } catch (e) {}
-  QUALITY.acc = 0; QUALITY.n = 0; QUALITY.cool = 2;
+  QUALITY.level = 0; QUALITY.applied = null; QUALITY.acc = 0; QUALITY.n = 0; QUALITY.cool = 2;
   renderer.setAnimationLoop(frame);
   setTimeout(() => VRM.show(), 300);
   return true;
