@@ -729,6 +729,7 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputEncoding = THREE.LinearEncoding;
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType('local-floor');
+renderer.xr.setFramebufferScaleFactor(0.85);          // un poco menos de resolución en el visor = más cuadros por segundo
 renderer.domElement.style.touchAction = 'none';
 $('#stage').appendChild(renderer.domElement);
 
@@ -762,6 +763,68 @@ const trailMat = c => new THREE.ShaderMaterial({
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide
 });
 const haloMat = (c, o = 0.5) => new THREE.SpriteMaterial({ map: GLOW, color: c, transparent: true, opacity: o, depthWrite: false, blending: THREE.AdditiveBlending });
+
+/* Rendimiento: lo estático se fusiona en pocas mallas y los brillos van en un solo sistema de puntos */
+const BATCH = new Map(), _bm = new THREE.Matrix4(), _bq = new THREE.Quaternion(), _be = new THREE.Euler();
+function batch(geo, mat, x, y, z, sx = 1, sy = 1, sz = 1, rx = 0, ry = 0, rz = 0) {
+  _bq.setFromEuler(_be.set(rx, ry, rz));
+  _bm.compose(V(x, y, z), _bq, V(sx, sy, sz));
+  const g = geo.index ? geo.toNonIndexed() : geo.clone();
+  g.applyMatrix4(_bm);
+  if (!BATCH.has(mat)) BATCH.set(mat, []);
+  BATCH.get(mat).push(g);
+}
+function mergeGeos(list) {
+  const names = ['position', 'normal', 'uv'].filter(n => list.every(g => g.attributes[n]));
+  const out = new THREE.BufferGeometry();
+  for (const n of names) {
+    const size = list[0].attributes[n].itemSize, total = list.reduce((a, g) => a + g.attributes[n].count, 0);
+    const arr = new Float32Array(total * size); let off = 0;
+    for (const g of list) { arr.set(g.attributes[n].array, off); off += g.attributes[n].array.length; }
+    out.setAttribute(n, new THREE.BufferAttribute(arr, size));
+  }
+  out.computeBoundingSphere(); return out;
+}
+function flushBatches(order = 0) {
+  for (const [mat, list] of BATCH) { const m = new THREE.Mesh(mergeGeos(list), mat); m.frustumCulled = false; m.renderOrder = order; scene.add(m); list.forEach(g => g.dispose()); }
+  BATCH.clear();
+}
+// puntos de luz con tamaño en metros, color propio y parpadeo opcional (1 sola llamada de dibujo)
+const GLOW_V = `attribute float aSize; attribute float aBlink; attribute vec3 color; uniform float uTime; uniform float uHalfH;
+  varying vec3 vC; varying float vB;
+  void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = clamp(aSize * projectionMatrix[1][1] * uHalfH / max(-mv.z, 0.1), 0.0, 256.0);
+    vC = color; vB = aBlink > 0.0 ? 0.4 + 0.6 * (step(0.6, sin(uTime * 3.0 + aBlink * 17.0)) * 0.8 + 0.2) : 1.0;
+    gl_Position = projectionMatrix * mv; }`;
+const GLOW_F = `uniform sampler2D tMap; varying vec3 vC; varying float vB;
+  void main(){ float a = texture2D(tMap, gl_PointCoord).a; gl_FragColor = vec4(vC * a * vB, 1.0); }`;
+const U_HALFH = { value: 400 };
+function glowMaterial() {
+  return new THREE.ShaderMaterial({ uniforms: { tMap: { value: GLOW }, uTime: U_TIME, uHalfH: U_HALFH }, vertexShader: GLOW_V, fragmentShader: GLOW_F,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+}
+const GLOWS = { pos: [], col: [], size: [], blink: [] };
+function glowAt(x, y, z, color, size, alpha = 1, blink = 0) {
+  const c = new THREE.Color(color).multiplyScalar(alpha);
+  GLOWS.pos.push(x, y, z); GLOWS.col.push(c.r, c.g, c.b); GLOWS.size.push(size); GLOWS.blink.push(blink);
+}
+function flushGlows() {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(GLOWS.pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(GLOWS.col, 3));
+  g.setAttribute('aSize', new THREE.Float32BufferAttribute(GLOWS.size, 1));
+  g.setAttribute('aBlink', new THREE.Float32BufferAttribute(GLOWS.blink, 1));
+  const p = new THREE.Points(g, glowMaterial()); p.frustumCulled = false; scene.add(p);
+}
+// sistema de puntos dinámico (chispas, luces de autos)
+function dynGlow(n) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  g.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(n), 1));
+  g.setAttribute('aBlink', new THREE.BufferAttribute(new Float32Array(n), 1));
+  const p = new THREE.Points(g, glowMaterial()); p.frustumCulled = false; scene.add(p); return p;
+}
 
 /* Ambiente: ciudad neón */
 const U_TIME = { value: 0 }, U_BEAT = { value: 0 }, U_CLIMAX = { value: 0 }, U_HOLOGAIN = { value: 1 };
@@ -1031,7 +1094,7 @@ function tower(x, z, w, d, h, kind, near) {
   roofs.push([x, h, z, topR * 0.7, topR * 0.7, near, 'spire']);
   spires.push([x, h, z, topR * 0.45, Math.max(4, h * rand(0.12, 0.25))]);
   // anillos de neón flotando alrededor de las torres altas
-  if (h > 40) for (let k = 0; k < 1 + Math.floor(Math.random() * 3); k++) haloRings.push([x, pod + body * rand(0.35, 0.92), z, topR * (kind === 'taper' ? 0.8 : 0.62) + 0.6]);
+  if (false) haloRings.push([x, pod + body * rand(0.35, 0.92), z, topR * (kind === 'taper' ? 0.8 : 0.62) + 0.6]);
 }
 const pickKind = (near) => {
   const r = Math.random();
@@ -1080,23 +1143,26 @@ for (const side of ['-1', '1']) {
     bridges.push([(x1 + x2) / 2, Math.min(h1, h2) * rand(0.45, 0.8), (z1 + z2) / 2, Math.abs(z1 - z2) - (w1 + w2) * 0.25]);
   }
 }
+// megarrascacielos al fondo de la avenida: torre retorcida gigante
+SPEC.twist.push([0, 85, -230, 22, 170, 22]); roofs.push([0, 170, -230, 5, 5, false, 'spire']); spires.push([0, 170, -230, 5, 45]);
+const STREET_COUNT = Object.fromEntries(Object.entries(SPEC).map(([k, v]) => [k, v.length]));
 // horizonte lejano, con más aire entre torres
 for (let i = 0; i < 80; i++) {
   const x = (Math.random() < 0.5 ? -1 : 1) * rand(22, 110), z = rand(-120, -210);
   tower(x, z, rand(8, 14), rand(8, 14), rand(35, 120), pickKind(false), false);
 }
-// megarrascacielos al fondo de la avenida: torre retorcida gigante
-SPEC.twist.push([0, 85, -230, 22, 170, 22]); roofs.push([0, 170, -230, 5, 5, false, 'spire']); spires.push([0, 170, -230, 5, 45]);
-haloRings.push([0, 75, -230, 15.5], [0, 112, -230, 15], [0, 150, -230, 14.5]);
 
+const CITY_MESHES = [];
 function instanced(geo, specs, o) {
   if (!specs.length) return;
+  const key = Object.keys(SPEC).find(k => SPEC[k] === specs);
   const m = new THREE.InstancedMesh(geo, cityMat(o, false), specs.length);
   const ob = new THREE.Object3D();
   specs.forEach(([x, y, z, sx, sy, sz], i) => { ob.position.set(x, y, z); ob.scale.set(sx, sy, sz); ob.updateMatrix(); m.setMatrixAt(i, ob.matrix); });
   m.frustumCulled = false; scene.add(m);
   const refl = new THREE.InstancedMesh(geo, cityMat(o, true), specs.length);   // reflejo en el asfalto mojado
   refl.instanceMatrix = m.instanceMatrix; refl.scale.y = -1; refl.frustumCulled = false; scene.add(refl);
+  CITY_MESHES.push({ m, refl, full: specs.length, street: STREET_COUNT[key] });
 }
 instanced(new THREE.BoxGeometry(1, 1, 1), SPEC.box, {});
 instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 8, 1), SPEC.oct, { cyl: true, seg: 8, segOff: 0 });
@@ -1114,28 +1180,28 @@ const cityNeonBase = neonPal.map(c => new THREE.Color(c));
   const dark = new THREE.MeshBasicMaterial({ color: 0x120d1f });
   const spireGeo = new THREE.ConeGeometry(1, 1, 8, 1), needleGeo = new THREE.CylinderGeometry(0.04, 0.04, 1, 6);
   spires.forEach(([x, y, z, r, h], i) => {
-    const cone = new THREE.Mesh(spireGeo, dark); cone.scale.set(r, h * 0.45, r); cone.position.set(x, y + h * 0.225, z); scene.add(cone);
-    const needle = new THREE.Mesh(needleGeo, CITY_NEON[i % 3]); needle.scale.set(1, h, 1); needle.position.set(x, y + h / 2, z); scene.add(needle);
-    const tip = new THREE.Sprite(haloMat(neonPal[i % 3], 0.85)); tip.scale.setScalar(Math.max(1.2, h * 0.12)); tip.position.set(x, y + h, z); scene.add(tip);
+    batch(spireGeo, dark, x, y + h * 0.225, z, r, h * 0.45, r);
+    batch(needleGeo, CITY_NEON[i % 3], x, y + h / 2, z, 1, h, 1);
+    glowAt(x, y + h, z, neonPal[i % 3], Math.max(1.2, h * 0.12), 0.85);
   });
   const ringGeo = new THREE.TorusGeometry(1, 0.035, 6, 64);
   haloRings.forEach(([x, y, z, r], i) => {
-    const t = new THREE.Mesh(ringGeo, CITY_NEON[(i + 1) % 3]); t.scale.set(r, r, 1); t.rotation.x = Math.PI / 2; t.position.set(x, y, z); scene.add(t);
+    batch(ringGeo, CITY_NEON[(i + 1) % 3], x, y, z, r, r, 1, Math.PI / 2);
   });
   const bGeo = new THREE.BoxGeometry(1, 1, 1);
   // marquesinas sobre las tiendas, con borde de neón
   decor.canopies.forEach(([x, y, z, w, h, d, side], i) => {
-    const cpy = new THREE.Mesh(bGeo, dark); cpy.scale.set(w, h, d); cpy.position.set(x, y, z); scene.add(cpy);
-    const lip = new THREE.Mesh(bGeo, CITY_NEON[i % 3]); lip.scale.set(0.05, 0.05, d); lip.position.set(x - side * w / 2, y - h / 2, z); scene.add(lip);
+    batch(bGeo, dark, x, y, z, w, h, d);
+    batch(bGeo, CITY_NEON[i % 3], x - side * w / 2, y - h / 2, z, 0.05, 0.05, d);
   });
   // aletas verticales de luz en las fachadas de la calle
   decor.fins.forEach(([x, y, z, w, h, d], i) => {
-    const fin = new THREE.Mesh(bGeo, CITY_NEON[(i >> 1) % 3]); fin.scale.set(w * 0.35, h, d * 0.6); fin.position.set(x, y, z); scene.add(fin);
+    batch(bGeo, CITY_NEON[(i >> 1) % 3], x, y, z, w * 0.35, h, d * 0.6);
   });
   bridges.forEach(([x, y, z, len], i) => {
-    const b = new THREE.Mesh(bGeo, dark); b.scale.set(1.6, 1.1, len); b.position.set(x, y, z); scene.add(b);
-    const strip = new THREE.Mesh(bGeo, CITY_NEON[i % 3]); strip.scale.set(1.62, 0.08, len); strip.position.set(x, y - 0.5, z); scene.add(strip);
-    const strip2 = new THREE.Mesh(bGeo, CITY_NEON[(i + 1) % 3]); strip2.scale.set(1.62, 0.05, len); strip2.position.set(x, y + 0.55, z); scene.add(strip2);
+    batch(bGeo, dark, x, y, z, 1.6, 1.1, len);
+    batch(bGeo, CITY_NEON[i % 3], x, y - 0.5, z, 1.62, 0.08, len);
+    batch(bGeo, CITY_NEON[(i + 1) % 3], x, y + 0.55, z, 1.62, 0.05, len);
   });
 })();
 
@@ -1166,8 +1232,8 @@ const cityNeonBase = neonPal.map(c => new THREE.Color(c));
   const walkMat = new THREE.MeshBasicMaterial({ color: 0x0b0814 });
   const curbMat = new THREE.MeshBasicMaterial({ color: 0x2a2140 });
   for (const side of [-1, 1]) {
-    const walk = new THREE.Mesh(new THREE.BoxGeometry(5.4, 0.14, 120), walkMat); walk.position.set(side * 8.2, 0.07, -50); scene.add(walk);
-    const curb = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.15, 120), curbMat); curb.position.set(side * 5.5, 0.075, -50); scene.add(curb);
+    batch(new THREE.BoxGeometry(5.4, 0.14, 120), walkMat, side * 8.2, 0.07, -50);
+    batch(new THREE.BoxGeometry(0.08, 0.15, 120), curbMat, side * 5.5, 0.075, -50);
   }
   // charco de luz bajo cada farola
   const pc = document.createElement('canvas'); pc.width = pc.height = 128; const pg = pc.getContext('2d');
@@ -1177,40 +1243,37 @@ const cityNeonBase = neonPal.map(c => new THREE.Color(c));
   const poleMat = new THREE.MeshBasicMaterial({ color: 0x1b1528 });
   const poleGeo = new THREE.CylinderGeometry(0.05, 0.07, 5.2, 8), armGeo = new THREE.BoxGeometry(1.3, 0.06, 0.08), headGeo = new THREE.BoxGeometry(0.5, 0.08, 0.2);
   const lampColors = [0xffd9a0, 0xbff4ff];
-  const trunkGeo = new THREE.CylinderGeometry(0.1, 0.16, 2.8, 6), crownGeo = new THREE.IcosahedronGeometry(1, 2);
+  const headMats = lampColors.map(c => new THREE.MeshBasicMaterial({ color: c }));
+  const poolMats = lampColors.map(c => new THREE.MeshBasicMaterial({ map: poolTex, color: c, ...addBlend, opacity: 0.22 }));
+  const poolGeo = new THREE.PlaneGeometry(5.5, 5.5);
   const planterGeo = new THREE.BoxGeometry(1.6, 0.6, 1.6), planterLipGeo = new THREE.BoxGeometry(1.64, 0.04, 1.64);
-  const crownMat = new THREE.MeshBasicMaterial({ color: 0x06100e });
-  const crownRim = [fresnelMat(COL.left, 2.6, 0.6, 0.0), fresnelMat(0x7dffb0, 2.6, 0.5, 0.0)];
   for (let z = -2; z > -100; z -= 12) {
     for (const side of [-1, 1]) {
-      const col = lampColors[(Math.abs(z) / 10 + (side > 0 ? 1 : 0)) % 2 | 0];
-      const pole = new THREE.Mesh(poleGeo, poleMat); pole.position.set(side * 6.0, 2.6, z); scene.add(pole);
-      const arm = new THREE.Mesh(armGeo, poleMat); arm.position.set(side * 5.4, 5.15, z); scene.add(arm);
-      const head = new THREE.Mesh(headGeo, new THREE.MeshBasicMaterial({ color: col })); head.position.set(side * 4.9, 5.1, z); scene.add(head);
-      const glow = new THREE.Sprite(haloMat(col, 0.55)); glow.scale.setScalar(1.6); glow.position.set(side * 4.9, 5.0, z); scene.add(glow);
-      const pool = new THREE.Mesh(new THREE.PlaneGeometry(5.5, 5.5), new THREE.MeshBasicMaterial({ map: poolTex, color: col, ...addBlend, opacity: 0.22 }));
-      pool.rotation.x = -Math.PI / 2; pool.position.set(side * 5.2, 0.16, z); scene.add(pool);
-      // árbol en una jardinera iluminada, entre farola y farola
+      const ci = (Math.abs(z) / 10 + (side > 0 ? 1 : 0)) % 2 | 0, col = lampColors[ci];
+      batch(poleGeo, poleMat, side * 6.0, 2.6, z);
+      batch(armGeo, poleMat, side * 5.4, 5.15, z);
+      batch(headGeo, headMats[ci], side * 4.9, 5.1, z);
+      glowAt(side * 4.9, 5.0, z, col, 1.6, 0.55);
+      batch(poolGeo, poolMats[ci], side * 5.2, 0.16, z, 1, 1, 1, -Math.PI / 2);
+      // banca baja de piedra con borde de luz, entre farola y farola
       const tz = z - 6;
-      if (tz > -12) continue;                                     // sin árboles pegados a la cámara
-      const trunk = new THREE.Mesh(trunkGeo, poleMat); trunk.position.set(side * 8.4, 1.4, tz); scene.add(trunk);
-      const crown = new THREE.Mesh(crownGeo, crownMat); crown.scale.set(1.05, 1.3, 1.05); crown.position.set(side * 8.4, 3.6, tz); scene.add(crown);
-      const rim = new THREE.Mesh(crownGeo, crownRim[(Math.abs(tz) / 12 | 0) % 2]); rim.scale.set(1.09, 1.35, 1.09); rim.position.copy(crown.position); scene.add(rim);
-      const planter = new THREE.Mesh(planterGeo, poleMat); planter.position.set(side * 8.4, 0.3, tz); scene.add(planter);
-      const planterLip = new THREE.Mesh(planterLipGeo, CITY_NEON[(Math.abs(tz) / 12 | 0) % 3]); planterLip.position.set(side * 8.4, 0.61, tz); scene.add(planterLip);
+      if (tz > -12) continue;
+      batch(planterGeo, poleMat, side * 8.4, 0.22, tz, 0.7, 0.75, 1.6);
+      batch(planterLipGeo, CITY_NEON[(Math.abs(tz) / 12 | 0) % 3], side * 8.4, 0.45, tz, 0.7, 1, 1.6);
     }
   }
 })();
 
 // antenas con luz que parpadea
 const beacons = [];
+const antMat = new THREE.MeshBasicMaterial({ color: 0x1a1030 }), antGeo = new THREE.CylinderGeometry(0.03, 0.05, 1, 6);
 roofs.forEach(([x, y, z, w, d, near, kind], i) => {
   if (kind === 'spire' || i % 3 !== 0) return;
-  const big = i === roofs.length - 1, hh = big ? 18 : rand(1.5, 4);
-  const ant = new THREE.Mesh(new THREE.CylinderGeometry(big ? 0.25 : 0.03, big ? 0.5 : 0.05, hh, 6), new THREE.MeshBasicMaterial({ color: 0x1a1030 }));
-  ant.position.set(x, y + hh / 2, z); scene.add(ant);
-  const bl = new THREE.Sprite(haloMat(i % 2 ? COL.right : 0xff3344, 0.9)); bl.scale.setScalar(big ? 9 : 1.1); bl.position.set(x, y + hh, z); scene.add(bl); beacons.push(bl);
+  const hh = rand(1.5, 4);
+  batch(antGeo, antMat, x, y + hh / 2, z, 1, hh, 1);
+  glowAt(x, y + hh, z, i % 2 ? COL.right : 0xff3344, 1.1, 0.9, 1 + i);
 });
+flushBatches(); flushGlows();
 
 // carteles holográficos en las fachadas de la calle
 function adTex(text, c1, c2) {
@@ -1241,20 +1304,35 @@ frontFaces.forEach(([x, z, side, w, h], i) => {
   m.position.set(x, Math.min(h - 2, rand(5, 9)), z); m.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2; scene.add(m);
 });
 
-// autos voladores con estela
+// autos voladores con estela (instanciados: 3 llamadas de dibujo para todos)
 const carTrailGeo = new THREE.CylinderGeometry(0.07, 0.0, 1, 8, 1, true);
-const carMats = { head: trailMat(0xbff4ff), tail: trailMat(0xff2a55) };
-const cars = [];
-for (let i = 0; i < 34; i++) {
+carTrailGeo.rotateX(Math.PI / 2); carTrailGeo.translate(0, 0, -0.5);       // la estela sale hacia atrás (-z)
+const NCARS = 34, cars = [];
+const carBody = new THREE.InstancedMesh(new THREE.BoxGeometry(0.35, 0.12, 0.7), new THREE.MeshBasicMaterial({ color: 0x120c22 }), NCARS);
+const carTrails = [new THREE.InstancedMesh(carTrailGeo, trailMat(0xbff4ff), NCARS), new THREE.InstancedMesh(carTrailGeo, trailMat(0xff2a55), NCARS)];
+const carLights = dynGlow(NCARS);
+[carBody, ...carTrails].forEach(m => { m.frustumCulled = false; scene.add(m); });
+for (let i = 0; i < NCARS; i++) {
   const dir = Math.random() < 0.5 ? 1 : -1, side = Math.random() < 0.5 ? -1 : 1;
-  const g = new THREE.Group();
-  const col = dir > 0 ? 0xdff8ff : 0xff3355;
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.12, 0.7), new THREE.MeshBasicMaterial({ color: 0x120c22 })); g.add(body);
-  const light = new THREE.Sprite(haloMat(col, 0.95)); light.scale.setScalar(0.9); light.position.z = dir * 0.35; g.add(light);
-  const L = rand(3, 7), tr = new THREE.Mesh(carTrailGeo, dir > 0 ? carMats.head : carMats.tail);
-  tr.rotation.x = dir > 0 ? Math.PI / 2 : -Math.PI / 2; tr.scale.y = L; tr.position.z = -dir * L / 2; g.add(tr);
-  g.position.set(side * rand(8, 40), rand(12, 45), rand(-130, 5)); scene.add(g);
-  cars.push({ g, v: dir * rand(10, 24) });
+  const c = new THREE.Color(dir > 0 ? 0xdff8ff : 0xff3355).multiplyScalar(0.95);
+  carLights.geometry.attributes.color.setXYZ(i, c.r, c.g, c.b); carLights.geometry.attributes.aSize.setX(i, 0.9);
+  cars.push({ p: V(side * rand(8, 40), rand(12, 45), rand(-130, 5)), v: dir * rand(10, 24), dir, L: rand(3, 7) });
+}
+carTrails[0].count = 0; carTrails[1].count = 0;
+const _co = new THREE.Object3D();
+function updateCars(dt) {
+  const pos = carLights.geometry.attributes.position; let n0 = 0, n1 = 0;
+  cars.forEach((c, i) => {
+    c.p.z += c.v * dt * ENV_SPEED; if (c.p.z > 8) c.p.z = -130; if (c.p.z < -130) c.p.z = 8;
+    _co.position.copy(c.p); _co.rotation.set(0, c.dir > 0 ? Math.PI : 0, 0); _co.scale.set(1, 1, 1); _co.updateMatrix();
+    carBody.setMatrixAt(i, _co.matrix);
+    _co.scale.set(1, 1, c.L); _co.updateMatrix();
+    if (c.dir > 0) carTrails[0].setMatrixAt(n0++, _co.matrix); else carTrails[1].setMatrixAt(n1++, _co.matrix);
+    pos.setXYZ(i, c.p.x, c.p.y, c.p.z + c.dir * 0.35);
+  });
+  carTrails[0].count = n0; carTrails[1].count = n1;
+  carBody.instanceMatrix.needsUpdate = carTrails[0].instanceMatrix.needsUpdate = carTrails[1].instanceMatrix.needsUpdate = true;
+  pos.needsUpdate = true;
 }
 
 // reflectores que suben desde las azoteas
@@ -1336,13 +1414,20 @@ function updateRings(dt, pulse, beatPhase, beatHand, level, boost) {
 // Rayos de velocidad
 const streakGeo = new THREE.CylinderGeometry(0.012, 0.0, 1, 6, 1, true);
 const streakMats = NEON.map(c => trailMat(c));
-const streaks = [];
+const streaks = [], streakMeshes = streakMats.map(m => { const im = new THREE.InstancedMesh(streakGeo, m, 12); im.frustumCulled = false; scene.add(im); return im; });
 for (let i = 0; i < 46; i++) {
-  const m = new THREE.Mesh(streakGeo, streakMats[i % 4]);
-  m.rotation.x = Math.PI / 2; m.scale.y = 2 + Math.random() * 3;
   const a = Math.random() * Math.PI * 2, r = 3.5 + Math.random() * 7;
-  m.position.set(Math.cos(a) * r, Math.max(0.3, 1.6 + Math.sin(a) * r * 0.8), -60 + Math.random() * 60);
-  scene.add(m); streaks.push({ m, v: 14 + Math.random() * 18 });
+  streaks.push({ k: i % 4, slot: (i / 4) | 0, len: 2 + Math.random() * 3, v: 14 + Math.random() * 18,
+    p: V(Math.cos(a) * r, Math.max(0.3, 1.6 + Math.sin(a) * r * 0.8), -60 + Math.random() * 60) });
+}
+const _so = new THREE.Object3D();
+function updateStreaks(dt) {
+  for (const s of streaks) {
+    s.p.z += s.v * dt * ENV_SPEED; if (s.p.z > 6) s.p.z = -60;
+    _so.position.copy(s.p); _so.rotation.set(Math.PI / 2, 0, 0); _so.scale.set(1, s.len, 1); _so.updateMatrix();
+    streakMeshes[s.k].setMatrixAt(s.slot, _so.matrix);
+  }
+  streakMeshes.forEach((m, k) => { m.count = Math.floor((46 - k + 3) / 4); m.instanceMatrix.needsUpdate = true; });
 }
 
 // Focos que barren el escenario
@@ -1402,7 +1487,7 @@ let ENV_SPEED = 1;
 function updateEnv(dt) {
   U_TIME.value += dt;
   const t = U_TIME.value;
-  for (const s of streaks) { s.m.position.z += s.v * dt * ENV_SPEED; if (s.m.position.z > 6) s.m.position.z = -60; }
+  updateStreaks(dt);
   const dp = dust.geometry.attributes.position;
   for (let i = 0; i < dp.count; i++) {
     let z = dp.getZ(i) + dt * 1.6 * ENV_SPEED; if (z > 6) z = -45;
@@ -1410,9 +1495,8 @@ function updateEnv(dt) {
   }
   dp.needsUpdate = true;
   beams.forEach((b, i) => { b.rotation.z = Math.sin(t * 0.45 + i * 1.3) * 0.55; b.rotation.x = -0.35 + Math.sin(t * 0.3 + i) * 0.25; });
-  beacons.forEach((b, i) => { b.material.opacity = 0.4 + 0.6 * (Math.sin(t * 3 + i) > 0.6 ? 1 : 0.2); });
   portal.rotation.z = t * 0.15;
-  for (const c of cars) { c.g.position.z += c.v * dt; if (c.g.position.z > 8) c.g.position.z = -115; if (c.g.position.z < -115) c.g.position.z = 8; }
+  updateCars(dt);
   searchlights.forEach((m, i) => { m.rotation.z = Math.sin(t * 0.35 + i * 1.7) * 0.35; m.rotation.x = Math.PI + Math.sin(t * 0.27 + i) * 0.3; });
   // brasas
   const ep = embers.geometry.attributes.position, ec = embers.geometry.attributes.color;
@@ -1455,25 +1539,30 @@ const M = palette.map(c => ({
 
 // Marco neón de un cubo: 12 aristas gruesas (las líneas WebGL miden 1 px)
 const frameGeoCache = {};
+// marco de aristas fusionado en una sola geometría (antes eran 12 mallas por cubo)
 function edgeFrame(sx, sy, sz, th, mat) {
   const k = [sx, sy, sz, th].join('|');
-  const geos = frameGeoCache[k] || (frameGeoCache[k] = [new THREE.BoxGeometry(sx + th, th, th), new THREE.BoxGeometry(th, sy + th, th), new THREE.BoxGeometry(th, th, sz + th)]);
-  const g = new THREE.Group(), hx = sx / 2, hy = sy / 2, hz = sz / 2;
-  for (const a of [-1, 1]) for (const b of [-1, 1]) {
-    const x = new THREE.Mesh(geos[0], mat); x.position.set(0, a * hy, b * hz); g.add(x);
-    const y = new THREE.Mesh(geos[1], mat); y.position.set(a * hx, 0, b * hz); g.add(y);
-    const z = new THREE.Mesh(geos[2], mat); z.position.set(a * hx, b * hy, 0); g.add(z);
+  if (!frameGeoCache[k]) {
+    const parts = [], hx = sx / 2, hy = sy / 2, hz = sz / 2;
+    const add = (w, h, d, x, y, z) => { const g = new THREE.BoxGeometry(w, h, d).toNonIndexed(); g.translate(x, y, z); parts.push(g); };
+    for (const a of [-1, 1]) for (const b of [-1, 1]) {
+      add(sx + th, th, th, 0, a * hy, b * hz); add(th, sy + th, th, a * hx, 0, b * hz); add(th, th, sz + th, a * hx, b * hy, 0);
+    }
+    frameGeoCache[k] = mergeGeos(parts);
   }
-  return g;
+  return new THREE.Mesh(frameGeoCache[k], mat);
 }
 function squareFrame(s, th, mat, z) {
-  const g = new THREE.Group(), h = s / 2;
-  const hg = new THREE.BoxGeometry(s + th, th, th), vg = new THREE.BoxGeometry(th, s + th, th);
-  for (const a of [-h, h]) {
-    const m1 = new THREE.Mesh(hg, mat); m1.position.set(0, a, z); g.add(m1);
-    const m2 = new THREE.Mesh(vg, mat); m2.position.set(a, 0, z); g.add(m2);
+  const k = 'sq|' + s + '|' + th + '|' + z;
+  if (!frameGeoCache[k]) {
+    const parts = [], h = s / 2;
+    for (const a of [-h, h]) {
+      const g1 = new THREE.BoxGeometry(s + th, th, th).toNonIndexed(); g1.translate(0, a, z); parts.push(g1);
+      const g2 = new THREE.BoxGeometry(th, s + th, th).toNonIndexed(); g2.translate(a, 0, z); parts.push(g2);
+    }
+    frameGeoCache[k] = mergeGeos(parts);
   }
-  return g;
+  return new THREE.Mesh(frameGeoCache[k], mat);
 }
 
 function makeNote(n, speed) {
@@ -1515,13 +1604,14 @@ function makeNote(n, speed) {
 
 /* Efectos de golpe */
 const sparkGeo = new THREE.SphereGeometry(0.014, 6, 4);
-const sparks = [];
-for (let i = 0; i < 180; i++) { const m = new THREE.Mesh(sparkGeo, M[0].core); m.visible = false; scene.add(m); sparks.push({ m, v: V(), life: 0 }); }
+const NSPARK = 180, sparkPts = dynGlow(NSPARK), sparks = [];
+for (let i = 0; i < NSPARK; i++) sparks.push({ p: V(0, -50, 0), v: V(), life: 0, c: new THREE.Color() });
 let sparkI = 0;
 function burst(pos, ci, n) {
+  const base = new THREE.Color(palette[ci]).lerp(new THREE.Color(0xffffff), 0.5);
   for (let i = 0; i < n; i++) {
-    const s = sparks[sparkI++ % sparks.length];
-    s.m.material = M[ci].core; s.m.position.copy(pos); s.m.visible = true;
+    const s = sparks[sparkI++ % NSPARK];
+    s.p.copy(pos); s.c.copy(base);
     s.v.set((Math.random() - 0.5) * 3.4, (Math.random() - 0.3) * 3.4, (Math.random() - 0.6) * 3.4); s.life = 0.55;
   }
 }
@@ -1555,11 +1645,15 @@ function showLabel(text, color, pos) {
   l.sp.position.copy(pos).y += 0.22; l.sp.visible = true; l.life = 0.75;
 }
 function updateFx(dt) {
-  for (const s of sparks) {
-    if (s.life <= 0) continue;
-    s.life -= dt; s.v.y -= 6 * dt; s.m.position.addScaledVector(s.v, dt);
-    s.m.scale.setScalar(Math.max(0.01, s.life / 0.55)); if (s.life <= 0) s.m.visible = false;
-  }
+  { const sp = sparkPts.geometry.attributes.position, sc = sparkPts.geometry.attributes.color, ss = sparkPts.geometry.attributes.aSize;
+    for (let i = 0; i < NSPARK; i++) {
+      const s = sparks[i];
+      if (s.life <= 0) { ss.setX(i, 0); continue; }
+      s.life -= dt; s.v.y -= 6 * dt; s.p.addScaledVector(s.v, dt);
+      const k = Math.max(0, s.life / 0.55);
+      sp.setXYZ(i, s.p.x, s.p.y, s.p.z); sc.setXYZ(i, s.c.r * k * 1.3, s.c.g * k * 1.3, s.c.b * k * 1.3); ss.setX(i, 0.028 * (0.4 + k));
+    }
+    sp.needsUpdate = sc.needsUpdate = ss.needsUpdate = true; }
   for (const w of waves) {
     if (w.life <= 0) continue;
     w.life -= dt; const k = 1 - w.life / 0.35;
@@ -1634,10 +1728,13 @@ function makeGlove(color, s) { // s: -1 izquierda, 1 derecha
   const glowMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false });
   // capa interior invisible: oculta las líneas de atrás para que el guante se lea limpio
   const occl = new THREE.MeshBasicMaterial({ colorWrite: false, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 });
-  const solid = geo => { const o = new THREE.Mesh(geo, occl), a = new THREE.Mesh(geo, glass), b = new THREE.Mesh(geo, rim); o.renderOrder = -1; g.add(o, a, b); return [o, a, b]; };
+  // se juntan todas las piezas en pocas mallas: así el guante cuesta ~8 llamadas de dibujo y no ~60
+  const solids = [], cores = [], glows = [];
+  const asList = geo => (geo.index ? geo.toNonIndexed() : geo.clone());
+  const solid = geo => solids.push(asList(geo));
   const neon = (pts, closed = false) => {
     const c = new THREE.CatmullRomCurve3(pts, closed), n = Math.max(12, pts.length * 3);
-    g.add(new THREE.Mesh(new THREE.TubeGeometry(c, n, 0.0014, 5, closed), coreMat), new THREE.Mesh(new THREE.TubeGeometry(c, n, 0.004, 6, closed), glowMat));
+    cores.push(asList(new THREE.TubeGeometry(c, n, 0.0014, 5, closed))); glows.push(asList(new THREE.TubeGeometry(c, n, 0.004, 6, closed)));
   };
   const arc = (fn, a0, a1, n = 24) => { const pts = []; for (let i = 0; i <= n; i++) pts.push(fn(a0 + (a1 - a0) * i / n)); return pts; };
 
@@ -1647,10 +1744,10 @@ function makeGlove(color, s) { // s: -1 izquierda, 1 derecha
   solid(tg);
   // llamas de neón alrededor del guante
   const fire = flameMat(color, 0.014, 26, 0.55);
-  g.add(new THREE.Mesh(fistGeo, fire), new THREE.Mesh(tg, fire));
+  g.add(new THREE.Mesh(mergeGeos([asList(fistGeo), asList(tg)]), fire));
   const tc = thumbCurve(s);
   for (const t of [0, 1]) { const tip = new THREE.SphereGeometry(thumbR(t), 16, 12); tip.translate(...tc.getPointAt(t).toArray()); solid(tip); }
-  solid(cuffGeo).forEach(m => { m.rotation.x = Math.PI / 2; m.position.z = CUFF_Z; m.scale.z = 0.9; });
+  { const cg = asList(cuffGeo); cg.applyMatrix4(new THREE.Matrix4().compose(V(0, 0, CUFF_Z), new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0)), V(1, 1, 0.9))); solids.push(cg); }
 
   // costuras del dorso (paneles)
   for (const x of [-0.42, 0.42]) { const k = Math.sqrt(1 - x * x); neon(arc(a => surf(x, Math.sin(a) * k, -Math.cos(a) * k), -0.25, 2.45)); }
@@ -1673,6 +1770,8 @@ function makeGlove(color, s) { // s: -1 izquierda, 1 derecha
   neon(cuffRing(0.0565, CUFF_Z + 0.085, 0.35, Math.PI - 0.35));
   for (const a of [0.35, Math.PI - 0.35]) neon([V(Math.cos(a) * 0.0555, Math.sin(a) * 0.0555 * 0.9, CUFF_Z + 0.035), V(Math.cos(a) * 0.0565, Math.sin(a) * 0.0565 * 0.9, CUFF_Z + 0.085)]);
 
+  { const body = mergeGeos(solids), o = new THREE.Mesh(body, occl); o.renderOrder = -1; g.add(o, new THREE.Mesh(body, glass), new THREE.Mesh(body, rim)); }
+  g.add(new THREE.Mesh(mergeGeos(cores), coreMat), new THREE.Mesh(mergeGeos(glows), glowMat));
   // antebrazo oscuro (solo en modo pantalla)
   const arm = new THREE.Group();
   const armMesh = new THREE.Mesh(armGeo, new THREE.MeshBasicMaterial({ color: 0x0b0716, transparent: true, opacity: 0.85 }));
@@ -1860,6 +1959,28 @@ function resize() {
   PP.setSize();
 }
 window.addEventListener('resize', resize); resize();
+
+
+/* Calidad automática en VR: si el visor no llega a sus cuadros por segundo, se quitan detalles por pasos */
+const QUALITY = { level: 0, acc: 0, n: 0, cool: 0 };
+function applyQuality(vr) {
+  const L = vr ? QUALITY.level : 0;
+  CITY_MESHES.forEach(c => { c.refl.visible = !vr; c.m.count = L >= 2 ? c.street : c.full; c.refl.count = c.m.count; });
+  dust.visible = L < 1; beams.forEach(b => (b.visible = L < 1)); searchlights.forEach(b => (b.visible = L < 1));
+  streakMeshes.forEach(m => (m.visible = L < 2)); ringHalos.forEach(m => (m.visible = L < 2));
+  sky.visible = true;
+}
+function trackQuality(dt, vr) {
+  if (!vr) { if (QUALITY.applied !== 'pc') { applyQuality(false); QUALITY.applied = 'pc'; } return; }
+  if (QUALITY.applied !== 'vr' + QUALITY.level) { applyQuality(true); QUALITY.applied = 'vr' + QUALITY.level; }
+  QUALITY.cool = Math.max(0, QUALITY.cool - dt);
+  QUALITY.acc += dt; QUALITY.n++;
+  if (QUALITY.n >= 90) {
+    const avg = QUALITY.acc / QUALITY.n;
+    if (avg > 1 / 62 && QUALITY.level < 3 && QUALITY.cool <= 0) { QUALITY.level++; QUALITY.cool = 3; }
+    QUALITY.acc = 0; QUALITY.n = 0;
+  }
+}
 
 /* ---------- Juego ---------- */
 let game = null, session = null, source = null, gainNode = null, analyser = null, freq = null;
@@ -2090,9 +2211,12 @@ function frame() {
   // brasas de los guantes
   for (const f of fists) {
     if (!f.live) continue;
-    const n = f.vel > 2 ? 4 : 2, g = gloves[f.side];
+    const n = QUALITY.level >= 3 && inVR ? (f.vel > 2 ? 1 : 0) : (f.vel > 2 ? 4 : 2), g = gloves[f.side];
     for (let i = 0; i < n; i++) spawnEmber(g.localToWorld(V((Math.random() - 0.5) * 0.12, (Math.random() - 0.3) * 0.1, -0.13 + Math.random() * 0.15)), NEON[f.side]);
   }
+  { const lay = inVR && renderer.xr.getSession() && renderer.xr.getSession().renderState.baseLayer;
+    U_HALFH.value = lay ? lay.framebufferHeight / 2 : renderer.domElement.height / 2; }
+  trackQuality(dt, inVR);
   updateEnv(dt);
   updateFx(dt);
   VRM.update(); hud.visible = !!game && !VRM.open;
@@ -2466,6 +2590,9 @@ async function enterVR(fromLaunch) {
   session.addEventListener('end', () => { session = null; VRM.hide(); hud.visible = true; backToMenu(); renderer.setAnimationLoop(null); });
   try { renderer.xr.setFoveation && renderer.xr.setFoveation(1); } catch (e) {}
   await renderer.xr.setSession(session);
+  // 72 Hz estables dan más margen a la GPU que 90 Hz con caídas (las caídas son lo que marea)
+  try { if (session.updateTargetFrameRate && session.supportedFrameRates && [...session.supportedFrameRates].includes(72)) await session.updateTargetFrameRate(72); } catch (e) {}
+  QUALITY.acc = 0; QUALITY.n = 0; QUALITY.cool = 2;
   renderer.setAnimationLoop(frame);
   setTimeout(() => VRM.show(), 300);
   return true;
