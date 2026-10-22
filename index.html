@@ -37,7 +37,9 @@ h2{font-family:var(--display);font-weight:400;font-size:1.05rem;letter-spacing:.
 .song .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
 .song .best{font-size:.8rem;color:var(--gold);font-variant-numeric:tabular-nums;white-space:nowrap}
 .song .del{background:none;border:0;color:var(--muted);font-size:1.3rem;cursor:pointer;padding:0 4px;line-height:1}
-.song .del:hover{color:var(--left)}
+.song .del:hover{color:var(--right)}
+.song .del{font-size:1.05rem}
+.song .del.confirm{font:inherit;font-size:.82rem;font-weight:700;background:var(--right);color:#fff;border-radius:7px;padding:4px 9px}
 button,.btn{font:inherit;cursor:pointer;border-radius:10px;border:1px solid var(--line);background:#2a1f45;color:var(--fg);padding:10px 14px;font-weight:600}
 button:focus-visible,.btn:focus-within{outline:2px solid var(--gold);outline-offset:2px}
 button:disabled{opacity:.45;cursor:not-allowed}
@@ -501,7 +503,9 @@ function renderSongs() {
       <span class="name">${esc(s.name)}</span>
       ${s.yt ? '<span class="tag">YOUTUBE</span>' : ''}
       ${b ? `<span class="best">Récord ${b.toLocaleString('es-PE')}</span>` : ''}
-      ${s.demo ? '' : `<button class="del" data-del="${esc(s.id)}" aria-label="Quitar ${esc(s.name)}">×</button>`}
+      ${s.demo ? '' : (pendingDel === s.id
+        ? `<button class="del confirm" data-del="${esc(s.id)}" aria-label="Confirmar: borrar ${esc(s.name)}">¿Borrar?</button>`
+        : `<button class="del" data-del="${esc(s.id)}" aria-label="Borrar ${esc(s.name)}" title="Borrar canción">🗑</button>`)}
     </li>`;
   }).join('');
 }
@@ -556,15 +560,28 @@ async function prepare() {
   updateButtons();
 }
 
+// borrar una canción de la lista (el demo no se puede borrar)
+let pendingDel = null, pendingDelT = 0;
+async function deleteSong(id) {
+  const song = songs.find(s => s.id === id);
+  if (!song || song.demo) return false;
+  songs = songs.filter(s => s.id !== id); await DB.del(id);
+  for (const k of Object.keys(best)) if (k.startsWith(id + '|')) delete best[k];
+  store.set('rr-best', best);
+  if (selectedId === id) { selectedId = 'demo'; store.set('rr-sel', selectedId); prepared = null; prepare(); }
+  pendingDel = null; renderSongs();
+  setStatus(`Borraste "${song.name}" de tu lista.`);
+  return true;
+}
+function askDelete(id) {               // primer toque pide confirmación, el segundo borra
+  if (pendingDel === id && performance.now() - pendingDelT < 5000) return deleteSong(id);
+  pendingDel = id; pendingDelT = performance.now(); renderSongs();
+  setTimeout(() => { if (pendingDel === id && performance.now() - pendingDelT >= 5000) { pendingDel = null; renderSongs(); if (window.__VRM) window.__VRM.dirty(); } }, 5100);
+  return false;
+}
 $('#songs').addEventListener('click', async e => {
   const del = e.target.closest('[data-del]');
-  if (del) {
-    e.stopPropagation();
-    const id = del.dataset.del;
-    songs = songs.filter(s => s.id !== id); await DB.del(id);
-    if (selectedId === id) { selectedId = 'demo'; store.set('rr-sel', selectedId); prepare(); }
-    renderSongs(); return;
-  }
+  if (del) { e.stopPropagation(); askDelete(del.dataset.del); return; }
   const li = e.target.closest('.song'); if (!li || li.dataset.id === selectedId) return;
   selectedId = li.dataset.id; store.set('rr-sel', selectedId); prepared = null; renderSongs(); prepare();
 });
@@ -747,7 +764,7 @@ const trailMat = c => new THREE.ShaderMaterial({
 const haloMat = (c, o = 0.5) => new THREE.SpriteMaterial({ map: GLOW, color: c, transparent: true, opacity: o, depthWrite: false, blending: THREE.AdditiveBlending });
 
 /* Ambiente: ciudad neón */
-const U_TIME = { value: 0 }, U_BEAT = { value: 0 };
+const U_TIME = { value: 0 }, U_BEAT = { value: 0 }, U_CLIMAX = { value: 0 }, U_HOLOGAIN = { value: 1 };
 const NOISE = `
 float hash3(vec3 p){ p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
 float noise3(vec3 x){ vec3 i = floor(x); vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f);
@@ -815,6 +832,7 @@ const floorMat = new THREE.ShaderMaterial({
       gl_FragColor = vec4(c, alpha); }`
 });
 const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(420, 420), floorMat);
+floorMesh.renderOrder = -1;
 floorMesh.rotation.x = -Math.PI / 2; scene.add(floorMesh);
 const pad = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints([V(-1.6, 0.01, 1.6), V(1.6, 0.01, 1.6), V(1.6, 0.01, -1.6), V(-1.6, 0.01, -1.6)]), new THREE.LineBasicMaterial({ color: 0x9fe9ff }));
 scene.add(pad);
@@ -833,7 +851,7 @@ const CITY_V = `
     gl_Position = projectionMatrix * mv;
   }`;
 const CITY_F = `
-  uniform float uTime; uniform float uBeat; uniform float uMirror; uniform float uCyl;
+  uniform float uTime; uniform float uBeat; uniform float uMirror; uniform float uCyl; uniform float uClimax; uniform float uHoloGain;
   uniform vec3 uFog; uniform vec3 uA; uniform vec3 uB;
   varying vec3 vL; varying vec3 vN; varying vec3 vS; varying vec3 vW; varying float vSeed; varying float vDepth;
   float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -946,12 +964,47 @@ const CITY_F = `
     float fogF = clamp((vDepth - 20.0) / 140.0, 0.0, 0.9);
     float haze = exp(-max(P.y, 0.0) * 0.1) * 0.3 * smoothstep(10.0, 55.0, vDepth);
     c = mix(c, uFog, clamp(fogF + haze, 0.0, 0.93));
+    // CLÍMAX: el edificio se vuelve invisible y queda solo su estructura de neón
+    float alpha = 1.0;
+    if (uClimax > 0.01) {
+      float FHc = 3.2;
+      float uu, fwU;
+      if (uCyl > 0.5) { uu = atan(vL.z, vL.x) * vS.x * 0.5; }
+      else uu = abs(n.x) > 0.5 ? vL.z : vL.x;
+      float faceWc = uCyl > 0.5 ? 3.14159 * vS.x : (abs(n.x) > 0.5 ? vS.z : vS.x);
+      uu += faceWc * 0.5;
+      float topc = vL.y + vS.y * 0.5;
+      // distancias a las líneas: esquinas, techo, pisos y columnas
+      float dEdge = uCyl > 0.5 ? 1e3 : min(uu, faceWc - uu);
+      float dTop = vS.y - topc;
+      float dFloor = abs(fract(P.y / FHc + 0.5) - 0.5) * FHc;
+      float dCol = abs(fract(uu / 3.0 + 0.5) - 0.5) * 3.0;
+      if (abs(n.y) > 0.5) { dEdge = min(vS.x * 0.5 - abs(vL.x), vS.z * 0.5 - abs(vL.z)); dTop = 1e3; dFloor = 1e3; dCol = 1e3; }
+      float px = max(fwidth(P.y), 0.004);
+      float edgeL = 1.0 - smoothstep(px * 1.2, px * 3.0, min(dEdge, dTop));      // contorno grueso
+      float gridL = (1.0 - smoothstep(px * 0.5, px * 1.6, min(dFloor, dCol))) * 0.55;  // retícula fina
+      // barrido de luz que sube por los edificios con el ritmo
+      float scanY = mod(uTime * 22.0 + seed * 40.0, 140.0);
+      float scan = exp(-pow((P.y - scanY) * 0.25, 2.0));
+      vec3 holoC = mix(uA, uB, step(0.5, fract(seed * 3.7)));
+      holoC = mix(holoC, vec3(0.75, 0.45, 1.0), step(0.75, fract(seed * 5.3)));
+      float lines = clamp(edgeL + gridL * (0.6 + scan * 1.5) + scan * 0.12, 0.0, 1.0);
+      vec3 holo = holoC * lines * (1.0 + uBeat * 0.8) + holoC * 0.05 + vec3(0.9) * edgeL * uBeat * 0.25;
+      holo *= (1.0 - fogF * 0.6) * uHoloGain;
+      c = mix(c, holo, uClimax);
+      alpha = mix(1.0, max(lines, 0.04), uClimax);
+    }
     if (uMirror > 0.5) c *= 0.24 * smoothstep(-35.0, 0.0, vW.y);
-    gl_FragColor = vec4(c, 1.0);
+    gl_FragColor = vec4(c, alpha);
   }`;
+const cityMats = [];
 function cityMat(cyl, mirror) {
+  const m = cityMat0(cyl, mirror); cityMats.push(m); return m;
+}
+function cityMat0(cyl, mirror) {
   return new THREE.ShaderMaterial({
-    uniforms: { uTime: U_TIME, uBeat: U_BEAT, uMirror: { value: mirror ? 1 : 0 }, uCyl: { value: cyl ? 1 : 0 },
+    transparent: true,
+    uniforms: { uTime: U_TIME, uBeat: U_BEAT, uClimax: U_CLIMAX, uHoloGain: U_HOLOGAIN, uMirror: { value: mirror ? 1 : 0 }, uCyl: { value: cyl ? 1 : 0 },
       uFog: { value: new THREE.Color(0x1d0b45) }, uA: { value: new THREE.Color(COL.left) }, uB: { value: new THREE.Color(COL.right) } },
     vertexShader: CITY_V, fragmentShader: CITY_F, extensions: { derivatives: true }
   });
@@ -992,9 +1045,9 @@ function instanced(geo, specs, cyl) {
   const m = new THREE.InstancedMesh(geo, cityMat(cyl, false), specs.length);
   const o = new THREE.Object3D();
   specs.forEach(([x, y, z, sx, sy, sz], i) => { o.position.set(x, y, z); o.scale.set(sx, sy, sz); o.updateMatrix(); m.setMatrixAt(i, o.matrix); });
-  m.frustumCulled = false; scene.add(m);
+  m.frustumCulled = false; m.renderOrder = -2; scene.add(m);
   const refl = new THREE.InstancedMesh(geo, cityMat(cyl, true), specs.length);   // reflejo en el asfalto mojado
-  refl.instanceMatrix = m.instanceMatrix; refl.scale.y = -1; refl.frustumCulled = false; scene.add(refl);
+  refl.instanceMatrix = m.instanceMatrix; refl.scale.y = -1; refl.frustumCulled = false; refl.renderOrder = -3; scene.add(refl);
   return m;
 }
 instanced(new THREE.BoxGeometry(1, 1, 1), boxSpecs, false);
@@ -1012,11 +1065,12 @@ instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 32, 1, false), cylSpecs, true)
       else { const s = 0.5 + Math.random() * 1.1; props.push([px, y + s * 0.35, pz, s, s * 0.7, s * (0.6 + Math.random() * 0.6)]); }
     }
   });
-  const mat = new THREE.MeshBasicMaterial({ color: 0x15111f });
+  const mat = new THREE.MeshBasicMaterial({ color: 0x15111f, transparent: true });
+  window.__roofMat = mat;
   const put = (geo, list) => {
     const m = new THREE.InstancedMesh(geo, mat, list.length), o = new THREE.Object3D();
     list.forEach(([x, y, z, sx, sy, sz], i) => { o.position.set(x, y, z); o.scale.set(sx, sy, sz); o.updateMatrix(); m.setMatrixAt(i, o.matrix); });
-    m.frustumCulled = false; scene.add(m);
+    m.frustumCulled = false; m.renderOrder = -2; scene.add(m);
   };
   put(new THREE.BoxGeometry(1, 1, 1), props);
   put(new THREE.CylinderGeometry(0.5, 0.5, 1, 12), tanks);
@@ -1138,7 +1192,6 @@ const portal = new THREE.Mesh(new THREE.RingGeometry(2.3, 3.7, 160, 6), new THRE
 portal.position.set(0, 1.6, -7); scene.add(portal);
 
 // Anillos del túnel: núcleo + dos capas de resplandor que crecen en el clímax de la canción
-const U_CLIMAX = { value: 0 };
 const ringMats = [], ringGlows = [], ringHalos = [], rings = [];
 const ringBright = [new THREE.Color(COL.left), new THREE.Color(COL.right)];
 const ringWhite = new THREE.Color(0xffffff), tmpC = new THREE.Color();
@@ -1159,8 +1212,13 @@ function updateRings(dt, pulse, beatPhase, beatHand, level, boost) {
   const target = Math.max(THREE.MathUtils.smoothstep(level, 0.6, 0.92), Math.min(1, boost));
   climax += (target - climax) * (1 - Math.exp(-dt * (target > climax ? 5 : 0.7)));
   U_CLIMAX.value = climax;
+  const holo = climax > 0.06;                       // con el edificio transparente no debe tapar lo de atrás
+  for (const m of cityMats) if (m.depthWrite === holo) { m.depthWrite = !holo; m.needsUpdate = true; }
+  if (window.__roofMat) window.__roofMat.opacity = 1 - climax;
   const t = U_TIME.value;
-  const vr = renderer.xr.isPresenting, gGlow = vr ? 1 : 0.45, gHalo = vr ? 1 : 0.2, cap = vr ? 1.8 : 1.15;  // en pantalla el bloom ya suma brillo
+  const vr = renderer.xr.isPresenting || window.__simVR;
+  U_HOLOGAIN.value = vr ? 1 : 0.42;                                      // en pantalla el bloom ya multiplica las líneas
+  const gGlow = vr ? 1 : 0.45, gHalo = vr ? 1 : 0.2, cap = vr ? 1.8 : 1.15;  // en pantalla el bloom ya suma brillo
   for (let i = 0; i < rings.length; i++) {
     const side = i % 2;
     // en el clímax, una ola de luz recorre el túnel hacia ti en cada beat
@@ -2178,7 +2236,8 @@ const VRM = (() => {
     const pages = Math.max(1, Math.ceil(songs.length / PER)); page = Math.min(page, pages - 1);
     songs.slice(page * PER, page * PER + PER).forEach((s, i) => {
       const b = best[s.id + '|' + diff];
-      button('song:' + s.id, 46, 206 + i * 74, 560, 62, s.name + (s.yt ? '  ▶' : '') + (b ? `   ·  ${b.toLocaleString('es-PE')}` : ''), { sel: s.id === selectedId, align: 'left', fill: '#9fe9ff' });
+      if (!s.demo) button('del:' + s.id, 532, 206 + i * 74, 74, 62, pendingDel === s.id ? '¿Sí?' : '🗑', { sel: pendingDel === s.id, fill: '#ff3d6e', textCol: '#ffffff', font: pendingDel === s.id ? `700 24px ${body}` : `30px ${body}` });
+      button('song:' + s.id, 46, 206 + i * 74, s.demo ? 560 : 476, 62, s.name + (s.yt ? '  ▶' : '') + (b ? `   ·  ${b.toLocaleString('es-PE')}` : ''), { sel: s.id === selectedId, align: 'left', fill: '#9fe9ff' });
     });
     if (pages > 1) {
       button('up', 620, 206, 92, 62, '▲', { font: `34px ${disp}` });
@@ -2212,6 +2271,8 @@ const VRM = (() => {
 
   function act(id) {
     if (!id) return;
+    if (id.startsWith('del:')) { askDelete(id.slice(4)); dirty = true; return; }
+    if (id !== 'none') pendingDel = null;
     if (id.startsWith('song:')) {
       const sid = id.slice(5); if (sid === selectedId) return;
       selectedId = sid; store.set('rr-sel', sid); prepared = null; renderSongs(); prepare();
