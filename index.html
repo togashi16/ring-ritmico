@@ -1001,7 +1001,7 @@ function cityMat(o, mirror) {
   cityMats.push(m); return m;
 }
 
-const SPEC = { box: [], oct: [], twist: [], taper: [], cyl: [] };
+const SPEC = { box: [], oct: [], round: [], twist: [], taper: [], cyl: [] };
 const roofs = [], frontFaces = [], spires = [], haloRings = [], bridges = [];
 const rand = (a, b) => a + Math.random() * (b - a);
 function tower(x, z, w, d, h, kind, near) {
@@ -1015,65 +1015,79 @@ function tower(x, z, w, d, h, kind, near) {
     if (h > 50 && Math.random() < 0.6) spires.push([x, top, z, tw * 0.35, h * 0.18]);
     return;
   }
-  // torres especiales sobre un podio bajo
-  const pod = rand(5, 9);
-  SPEC.box.push([x, pod / 2, z, w * 1.25, pod, d * 1.25]);
-  const body = h - pod, r = Math.min(w, d);
-  if (kind === 'cyl') SPEC.cyl.push([x, pod + body / 2, z, r, body, r]);
-  else if (kind === 'oct') SPEC.oct.push([x, pod + body / 2, z, r, body, r]);
-  else if (kind === 'twist') SPEC.twist.push([x, pod + body / 2, z, r, body, r]);
-  else SPEC.taper.push([x, pod + body / 2, z, r * 1.414, body, r * 1.414]);
-  const topR = kind === 'taper' ? r * 0.72 : r;
+  // torres especiales (sobre un podio bajo, salvo en la primera fila)
+  const pod = near ? 0 : rand(5, 9);
+  if (pod) SPEC.box.push([x, pod / 2, z, w * 1.2, pod, d * 1.2]);
+  const body = h - pod;
+  // en la primera fila las formas se estiran al tamaño del lote; atrás son torres de planta regular
+  const sx = near ? w : Math.min(w, d), sz = near ? d : Math.min(w, d);
+  if (kind === 'cyl') SPEC.cyl.push([x, pod + body / 2, z, sx, body, sz]);
+  else if (kind === 'round') SPEC.round.push([x, pod + body / 2, z, sx * 1.08, body, sz * 1.08]);
+  else if (kind === 'oct') SPEC.oct.push([x, pod + body / 2, z, sx * 1.04, body, sz * 1.04]);
+  else if (kind === 'twist') SPEC.twist.push([x, pod + body / 2, z, sx, body, sz]);
+  else SPEC.taper.push([x, pod + body / 2, z, sx * 1.414, body, sz * 1.414]);
+  const topR = kind === 'taper' ? Math.min(sx, sz) * 0.72 : Math.min(sx, sz);
+  if (near) { roofs.push([x, h, z, sx * 0.55, sz * 0.55, near, 'flat']); return; }
   roofs.push([x, h, z, topR * 0.7, topR * 0.7, near, 'spire']);
   spires.push([x, h, z, topR * 0.45, Math.max(4, h * rand(0.12, 0.25))]);
   // anillos de neón flotando alrededor de las torres altas
-  if (h > 35) for (let k = 0; k < 1 + Math.floor(Math.random() * 3); k++) haloRings.push([x, pod + body * rand(0.35, 0.92), z, topR * (kind === 'taper' ? 0.8 : 0.62) + 0.5]);
+  if (h > 40) for (let k = 0; k < 1 + Math.floor(Math.random() * 3); k++) haloRings.push([x, pod + body * rand(0.35, 0.92), z, topR * (kind === 'taper' ? 0.8 : 0.62) + 0.6]);
 }
 const pickKind = (near) => {
   const r = Math.random();
-  if (near) return r < 0.6 ? 'box' : 'oct';
-  return r < 0.3 ? 'box' : r < 0.52 ? 'twist' : r < 0.72 ? 'taper' : r < 0.88 ? 'oct' : 'cyl';
+  if (near) return r < 0.3 ? 'box' : r < 0.65 ? 'oct' : 'round';          // esquinas achaflanadas o redondeadas
+  return r < 0.18 ? 'box' : r < 0.42 ? 'twist' : r < 0.62 ? 'taper' : r < 0.82 ? 'oct' : 'cyl';
 };
-// calle principal: tres filas por lado
+// avenida ancha: calzada de ~11 m, veredas de 5 m y edificios con callejones y plazas entre ellos
+const FRONT = 10.5;
 const row1 = { '-1': [], '1': [] };
 const decor = { canopies: [], fins: [] };
 for (const side of [-1, 1]) {
-  for (let i = 0; i < 17; i++) {
-    for (let j = 0; j < 3; j++) {
-      if (j > 0 && Math.random() < 0.18) continue;
-      const w = rand(3.2, 5.2), d = rand(3.6, 4.6), x = side * (7.4 + j * 7 + rand(0, 1.0)), z = -3 - i * 4.6 + rand(-0.3, 0.3);
-      // la primera fila es baja (tiendas y podios) para que se vean las torres futuristas de atrás
-      const h = j === 0 ? rand(9, 17) + (Math.random() < 0.15 ? 10 : 0) : j === 1 ? rand(30, 62) : rand(45, 95);
-      const kind = pickKind(j === 0);
-      tower(x, z, w, d, h, kind, j === 0);
-      if (j === 0 && kind === 'box') {
-        const fx = x - side * (w / 2);                               // fachada que mira a la calle
-        decor.canopies.push([fx - side * 0.45, 4.55, z, 0.9, 0.12, d * 0.86, side]);
-        const nf = 2 + Math.floor(Math.random() * 2);
-        for (let k = 0; k < nf; k++) decor.fins.push([fx - side * 0.12, 5.2 + (h - 5.2) / 2, z + (k - (nf - 1) / 2) * (d / nf), 0.24, h - 5.4, 0.1]);
-      }
-      if (j === 0 && i % 2 === 0 && i < 14) frontFaces.push([x - side * (w / 2 + 0.06), z, side, Math.min(d - 0.6, 3.0), h]);
-      if (j === 1) row1[side].push([x, z, h, w]);
+  // primera fila: lotes de 12 m con callejones de 3 a 6 m; de vez en cuando una plaza
+  for (let z = 1, i = 0; z > -100; z -= 12, i++) {
+    if (i > 0 && Math.random() < 0.14) continue;                     // plaza abierta
+    const d = rand(6, 9), w = rand(7, 10), x = side * (FRONT + w / 2 + rand(0, 0.8)), zc = z - 6 + rand(-0.8, 0.8);
+    const h = rand(10, 22) + (Math.random() < 0.2 ? 12 : 0);
+    const kind = pickKind(true);
+    tower(x, zc, w, d, h, kind, true);
+    if (kind === 'box') {
+      const fx = x - side * (w / 2);
+      decor.canopies.push([fx - side * 0.5, 4.55, zc, 1.0, 0.12, d * 0.86, side]);
+      const nf = 2 + Math.floor(Math.random() * 2);
+      for (let k = 0; k < nf; k++) decor.fins.push([fx - side * 0.12, 5.2 + (h - 5.2) / 2, zc + (k - (nf - 1) / 2) * (d / nf), 0.24, h - 5.4, 0.1]);
+      if (i % 2 === 0 && i < 8) frontFaces.push([fx - side * 0.06, zc, side, Math.min(d - 1.2, 3.4), h]);
     }
+  }
+  // segunda fila: torres medianas cada ~16 m
+  for (let z = -2; z > -110; z -= rand(14, 19)) {
+    const sz = rand(8, 11), x = side * rand(25, 30);
+    const h = rand(32, 72), kind = pickKind(false);
+    tower(x, z, sz, sz, h, kind, false);
+    row1[side].push([x, z, h, sz]);
+  }
+  // tercera fila: rascacielos cada ~20 m
+  for (let z = -8; z > -120; z -= rand(18, 24)) {
+    const sz = rand(10, 14);
+    tower(side * rand(42, 52), z, sz, sz, rand(55, 115), pickKind(false), false);
   }
 }
 // puentes aéreos entre torres vecinas de la segunda fila
 for (const side of ['-1', '1']) {
   const r = row1[side];
   for (let k = 0; k + 1 < r.length; k++) {
-    const [x1, z1, h1] = r[k], [x2, z2, h2] = r[k + 1];
-    if (Math.random() < 0.55 || Math.abs(z1 - z2) > 6) continue;
-    bridges.push([(x1 + x2) / 2, Math.min(h1, h2) * rand(0.45, 0.8), (z1 + z2) / 2, Math.abs(z1 - z2)]);
+    const [x1, z1, h1, w1] = r[k], [x2, z2, h2, w2] = r[k + 1];
+    if (Math.random() < 0.5 || Math.abs(z1 - z2) > 20) continue;
+    bridges.push([(x1 + x2) / 2, Math.min(h1, h2) * rand(0.45, 0.8), (z1 + z2) / 2, Math.abs(z1 - z2) - (w1 + w2) * 0.25]);
   }
 }
-// horizonte lejano
-for (let i = 0; i < 120; i++) {
-  const x = (Math.random() < 0.5 ? -1 : 1) * rand(12, 80), z = rand(-85, -170);
-  tower(x, z, rand(5, 11), rand(5, 11), rand(25, 95), pickKind(false), false);
+// horizonte lejano, con más aire entre torres
+for (let i = 0; i < 80; i++) {
+  const x = (Math.random() < 0.5 ? -1 : 1) * rand(22, 110), z = rand(-120, -210);
+  tower(x, z, rand(8, 14), rand(8, 14), rand(35, 120), pickKind(false), false);
 }
-// megarrascacielos al fondo del túnel: torre retorcida gigante
-SPEC.twist.push([0, 80, -180, 18, 160, 18]); roofs.push([0, 160, -180, 4, 4, false, 'spire']); spires.push([0, 160, -180, 4, 40]);
-haloRings.push([0, 70, -180, 13], [0, 105, -180, 12.5], [0, 140, -180, 12]);
+// megarrascacielos al fondo de la avenida: torre retorcida gigante
+SPEC.twist.push([0, 85, -230, 22, 170, 22]); roofs.push([0, 170, -230, 5, 5, false, 'spire']); spires.push([0, 170, -230, 5, 45]);
+haloRings.push([0, 75, -230, 15.5], [0, 112, -230, 15], [0, 150, -230, 14.5]);
 
 function instanced(geo, specs, o) {
   if (!specs.length) return;
@@ -1090,6 +1104,7 @@ instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 8, 24), SPEC.twist, { cyl: tru
 const taperGeo = new THREE.CylinderGeometry(0.36, 0.5, 1, 4, 1); taperGeo.rotateY(Math.PI / 4);
 instanced(taperGeo, SPEC.taper, { cyl: true, seg: 4, segOff: Math.PI / 4 });
 instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 36, 1), SPEC.cyl, { cyl: true });
+instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 20, 1), SPEC.round, { cyl: true });
 
 // agujas de luz en la cima, anillos flotantes y puentes aéreos (se encienden con el beat y el clímax)
 const neonPal = [COL.left, COL.right, 0xb36bff];
@@ -1151,8 +1166,8 @@ const cityNeonBase = neonPal.map(c => new THREE.Color(c));
   const walkMat = new THREE.MeshBasicMaterial({ color: 0x0b0814 });
   const curbMat = new THREE.MeshBasicMaterial({ color: 0x2a2140 });
   for (const side of [-1, 1]) {
-    const walk = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.14, 90), walkMat); walk.position.set(side * 5.0, 0.07, -38); scene.add(walk);
-    const curb = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.15, 90), curbMat); curb.position.set(side * 4.1, 0.075, -38); scene.add(curb);
+    const walk = new THREE.Mesh(new THREE.BoxGeometry(5.4, 0.14, 120), walkMat); walk.position.set(side * 8.2, 0.07, -50); scene.add(walk);
+    const curb = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.15, 120), curbMat); curb.position.set(side * 5.5, 0.075, -50); scene.add(curb);
   }
   // charco de luz bajo cada farola
   const pc = document.createElement('canvas'); pc.width = pc.height = 128; const pg = pc.getContext('2d');
@@ -1162,15 +1177,27 @@ const cityNeonBase = neonPal.map(c => new THREE.Color(c));
   const poleMat = new THREE.MeshBasicMaterial({ color: 0x1b1528 });
   const poleGeo = new THREE.CylinderGeometry(0.05, 0.07, 5.2, 8), armGeo = new THREE.BoxGeometry(1.3, 0.06, 0.08), headGeo = new THREE.BoxGeometry(0.5, 0.08, 0.2);
   const lampColors = [0xffd9a0, 0xbff4ff];
-  for (let z = -2; z > -78; z -= 10) {
+  const trunkGeo = new THREE.CylinderGeometry(0.1, 0.16, 2.8, 6), crownGeo = new THREE.IcosahedronGeometry(1, 2);
+  const planterGeo = new THREE.BoxGeometry(1.6, 0.6, 1.6), planterLipGeo = new THREE.BoxGeometry(1.64, 0.04, 1.64);
+  const crownMat = new THREE.MeshBasicMaterial({ color: 0x06100e });
+  const crownRim = [fresnelMat(COL.left, 2.6, 0.6, 0.0), fresnelMat(0x7dffb0, 2.6, 0.5, 0.0)];
+  for (let z = -2; z > -100; z -= 12) {
     for (const side of [-1, 1]) {
       const col = lampColors[(Math.abs(z) / 10 + (side > 0 ? 1 : 0)) % 2 | 0];
-      const pole = new THREE.Mesh(poleGeo, poleMat); pole.position.set(side * 4.6, 2.6, z); scene.add(pole);
-      const arm = new THREE.Mesh(armGeo, poleMat); arm.position.set(side * 4.0, 5.15, z); scene.add(arm);
-      const head = new THREE.Mesh(headGeo, new THREE.MeshBasicMaterial({ color: col })); head.position.set(side * 3.5, 5.1, z); scene.add(head);
-      const glow = new THREE.Sprite(haloMat(col, 0.55)); glow.scale.setScalar(1.6); glow.position.set(side * 3.5, 5.0, z); scene.add(glow);
+      const pole = new THREE.Mesh(poleGeo, poleMat); pole.position.set(side * 6.0, 2.6, z); scene.add(pole);
+      const arm = new THREE.Mesh(armGeo, poleMat); arm.position.set(side * 5.4, 5.15, z); scene.add(arm);
+      const head = new THREE.Mesh(headGeo, new THREE.MeshBasicMaterial({ color: col })); head.position.set(side * 4.9, 5.1, z); scene.add(head);
+      const glow = new THREE.Sprite(haloMat(col, 0.55)); glow.scale.setScalar(1.6); glow.position.set(side * 4.9, 5.0, z); scene.add(glow);
       const pool = new THREE.Mesh(new THREE.PlaneGeometry(5.5, 5.5), new THREE.MeshBasicMaterial({ map: poolTex, color: col, ...addBlend, opacity: 0.22 }));
-      pool.rotation.x = -Math.PI / 2; pool.position.set(side * 3.6, 0.02, z); scene.add(pool);
+      pool.rotation.x = -Math.PI / 2; pool.position.set(side * 5.2, 0.16, z); scene.add(pool);
+      // árbol en una jardinera iluminada, entre farola y farola
+      const tz = z - 6;
+      if (tz > -12) continue;                                     // sin árboles pegados a la cámara
+      const trunk = new THREE.Mesh(trunkGeo, poleMat); trunk.position.set(side * 8.4, 1.4, tz); scene.add(trunk);
+      const crown = new THREE.Mesh(crownGeo, crownMat); crown.scale.set(1.05, 1.3, 1.05); crown.position.set(side * 8.4, 3.6, tz); scene.add(crown);
+      const rim = new THREE.Mesh(crownGeo, crownRim[(Math.abs(tz) / 12 | 0) % 2]); rim.scale.set(1.09, 1.35, 1.09); rim.position.copy(crown.position); scene.add(rim);
+      const planter = new THREE.Mesh(planterGeo, poleMat); planter.position.set(side * 8.4, 0.3, tz); scene.add(planter);
+      const planterLip = new THREE.Mesh(planterLipGeo, CITY_NEON[(Math.abs(tz) / 12 | 0) % 3]); planterLip.position.set(side * 8.4, 0.61, tz); scene.add(planterLip);
     }
   }
 })();
@@ -1226,7 +1253,7 @@ for (let i = 0; i < 34; i++) {
   const light = new THREE.Sprite(haloMat(col, 0.95)); light.scale.setScalar(0.9); light.position.z = dir * 0.35; g.add(light);
   const L = rand(3, 7), tr = new THREE.Mesh(carTrailGeo, dir > 0 ? carMats.head : carMats.tail);
   tr.rotation.x = dir > 0 ? Math.PI / 2 : -Math.PI / 2; tr.scale.y = L; tr.position.z = -dir * L / 2; g.add(tr);
-  g.position.set(side * rand(4.2, 19), rand(6, 24), rand(-110, 5)); scene.add(g);
+  g.position.set(side * rand(8, 40), rand(12, 45), rand(-130, 5)); scene.add(g);
   cars.push({ g, v: dir * rand(10, 24) });
 }
 
